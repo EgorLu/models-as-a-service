@@ -7,6 +7,18 @@
 # artifact collection for Prow/CI. Use for diagnosing 403/401 issues,
 # DNS/connectivity problems, and collecting logs for analysis.
 #
+# Collected artifacts (under $ARTIFACT_DIR):
+#   authorino-debug.log        - Authorino pod logs (token-redacted)
+#   cluster-state.log          - Cluster snapshot (nodes, namespaces, policies, CRs)
+#   maas-debug-report.log      - Full MaaS debug report
+#   maas-crs/                  - Full YAML of MaaS custom resources:
+#     maasmodelrefs.yaml         - MaaSModelRef definitions
+#     maasauthpolicies.yaml      - MaaSAuthPolicy definitions
+#     maassubscriptions.yaml     - MaaSSubscription definitions
+#     externalmodels.yaml        - ExternalModel definitions
+#     tenants.yaml               - Tenant definitions
+#   pod-logs/                  - Per-pod logs from the deployment namespace
+#
 # Usage:
 #   source test/e2e/scripts/auth_utils.sh
 #   patch_authorino_debug
@@ -16,10 +28,15 @@
 #   ./test/e2e/scripts/auth_utils.sh
 #
 # Environment:
-#   DEPLOYMENT_NAMESPACE - Namespace of MaaS API and controller (default: opendatahub)
-#   MAAS_SUBSCRIPTION_NAMESPACE - Namespace of MaaS CRs (default: models-as-a-service)
-#   AUTHORINO_NAMESPACE - Namespace for Authorino (default: kuadrant-system)
-#   ARTIFACT_DIR       - Prow artifact dir; also ARTIFACTS, LOG_DIR (default: test/e2e/reports)
+#   DEPLOYMENT_NAMESPACE       - MaaS API and controller namespace (default: opendatahub)
+#   MAAS_SUBSCRIPTION_NAMESPACE - MaaS CRs namespace (default: models-as-a-service)
+#   AUTHORINO_NAMESPACE        - Authorino namespace (default: kuadrant-system)
+#   OPERATOR_NAMESPACE         - RHOAI operator namespace (default: redhat-ods-operator)
+#   APPLICATIONS_NAMESPACE     - RHOAI applications namespace (default: redhat-ods-applications)
+#   GATEWAY_NAMESPACE          - Gateway/ingress namespace (default: openshift-ingress)
+#   LLM_NAMESPACE              - LLM workload namespace (default: llm)
+#   ISTIO_NAMESPACE            - Istio/service mesh namespace (default: istio-system)
+#   ARTIFACT_DIR               - Prow artifact dir; also ARTIFACTS, LOG_DIR (default: test/e2e/reports)
 #
 # =============================================================================
 
@@ -38,6 +55,11 @@ PROJECT_ROOT="$(_find_root)"
 DEPLOYMENT_NAMESPACE="${DEPLOYMENT_NAMESPACE:-opendatahub}"
 MAAS_SUBSCRIPTION_NAMESPACE="${MAAS_SUBSCRIPTION_NAMESPACE:-models-as-a-service}"
 AUTHORINO_NAMESPACE="${AUTHORINO_NAMESPACE:-kuadrant-system}"
+OPERATOR_NAMESPACE="${OPERATOR_NAMESPACE:-redhat-ods-operator}"
+APPLICATIONS_NAMESPACE="${APPLICATIONS_NAMESPACE:-redhat-ods-applications}"
+GATEWAY_NAMESPACE="${GATEWAY_NAMESPACE:-openshift-ingress}"
+LLM_NAMESPACE="${LLM_NAMESPACE:-llm}"
+ISTIO_NAMESPACE="${ISTIO_NAMESPACE:-istio-system}"
 # OpenShift CI/Prow use ARTIFACT_DIR; respect ARTIFACTS_DIR if already set by caller
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-${ARTIFACT_DIR:-${ARTIFACTS:-${LOG_DIR:-$PROJECT_ROOT/test/e2e/reports}}}}"
 
@@ -93,7 +115,63 @@ collect_authorino_logs_redacted() {
       fi
     done
   done
-  [[ -s "$outfile" ]] && echo "  Saved to $outfile"
+  [[ -s "$outfile" ]] && echo "  Saved to $outfile" || true
+}
+
+# -----------------------------------------------------------------------------
+# Collect full MaaS CR YAML definitions to artifact dir
+# Mirrors the CRD list from red-hat-data-services/must-gather:
+#   gather_models_as_a_service
+# -----------------------------------------------------------------------------
+MAAS_CRDS=(
+  "maasmodelrefs.maas.opendatahub.io"
+  "maasauthpolicies.maas.opendatahub.io"
+  "maassubscriptions.maas.opendatahub.io"
+  "externalmodels.maas.opendatahub.io"
+  "tenants.maas.opendatahub.io"
+)
+
+collect_maas_crs() {
+  local outdir="${1:-$ARTIFACTS_DIR/maas-crs}"
+  mkdir -p "$outdir"
+  echo "Collecting MaaS CR definitions to $outdir"
+
+  local ns_list=""
+  for crd in "${MAAS_CRDS[@]}"; do
+    local nss
+    nss=$(kubectl get "$crd" --all-namespaces -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{end}' 2>/dev/null || true)
+    ns_list+=" $nss"
+  done
+  ns_list=$(echo "$ns_list" | tr ' ' '\n' | sort -u | grep -v '^$' || true)
+
+  if [[ -z "$ns_list" ]]; then
+    echo "  No MaaS CRs found in any namespace"
+    echo "No MaaS CRs found at $(date -Iseconds 2>/dev/null || date)" > "$outdir/no-crs-found.log"
+    return 0
+  fi
+
+  local total=0
+  for crd in "${MAAS_CRDS[@]}"; do
+    local short_name="${crd%%.*}"
+    local outfile="$outdir/${short_name}.yaml"
+    : > "$outfile"
+    for ns in $ns_list; do
+      local yaml
+      yaml=$(kubectl get "$crd" -n "$ns" -o yaml 2>/dev/null || true)
+      if [[ -n "$yaml" ]] && ! echo "$yaml" | grep -q 'items: \[\]'; then
+        {
+          echo "# --- namespace: $ns ---"
+          echo "$yaml"
+          echo ""
+        } | redact_tokens >> "$outfile"
+        total=$((total + 1))
+      fi
+    done
+    if [[ ! -s "$outfile" ]]; then
+      rm -f "$outfile"
+    fi
+  done
+  echo "  Saved CRs from $(echo "$ns_list" | wc -w | tr -d ' ') namespace(s) to $outdir ($total resource group(s))"
 }
 
 # -----------------------------------------------------------------------------
@@ -111,6 +189,18 @@ collect_cluster_state() {
     echo "--- MaaS deployment namespace ($DEPLOYMENT_NAMESPACE) ---"
     kubectl get all -n "$DEPLOYMENT_NAMESPACE" 2>/dev/null || true
     echo ""
+    echo "--- RHOAI Operator namespace ($OPERATOR_NAMESPACE) ---"
+    kubectl get pods,deployments,csv -n "$OPERATOR_NAMESPACE" -o wide 2>/dev/null || true
+    echo ""
+    echo "--- RHOAI Applications namespace ($APPLICATIONS_NAMESPACE) ---"
+    kubectl get pods,deployments,services -n "$APPLICATIONS_NAMESPACE" -o wide 2>/dev/null || true
+    echo ""
+    echo "--- DSC / DSCI ---"
+    kubectl get datasciencecluster,dscinitialization -o wide 2>/dev/null || true
+    echo ""
+    echo "--- Gateway namespace ($GATEWAY_NAMESPACE) ---"
+    kubectl get pods,services -n "$GATEWAY_NAMESPACE" -o wide 2>/dev/null || true
+    echo ""
     echo "--- AuthPolicies ---"
     kubectl get authpolicies -A 2>/dev/null || true
     echo ""
@@ -120,6 +210,7 @@ collect_cluster_state() {
     echo "--- MaaS CRs ---"
     kubectl get maasmodelrefs -n "$DEPLOYMENT_NAMESPACE" 2>/dev/null || true
     kubectl get maasauthpolicies,maassubscriptions -n "$MAAS_SUBSCRIPTION_NAMESPACE" 2>/dev/null || true
+    kubectl get tenants -n "$MAAS_SUBSCRIPTION_NAMESPACE" 2>/dev/null || true
     echo ""
     echo "--- HTTPRoutes ---"
     kubectl get httproutes -A 2>/dev/null | head -30 || true
@@ -156,7 +247,24 @@ collect_e2e_artifacts() {
   echo "Artifact dir: $ARTIFACTS_DIR"
   collect_authorino_logs_redacted "$ARTIFACTS_DIR/authorino-debug.log"
   collect_cluster_state "$ARTIFACTS_DIR"
-  collect_namespace_pod_logs "$DEPLOYMENT_NAMESPACE" "$ARTIFACTS_DIR/pod-logs"
+  collect_maas_crs "$ARTIFACTS_DIR/maas-crs"
+  local ns
+  for ns in \
+    "$DEPLOYMENT_NAMESPACE" \
+    "$MAAS_SUBSCRIPTION_NAMESPACE" \
+    "$OPERATOR_NAMESPACE" \
+    "$APPLICATIONS_NAMESPACE" \
+    "$AUTHORINO_NAMESPACE" \
+    "$GATEWAY_NAMESPACE" \
+    "$LLM_NAMESPACE" \
+    "$ISTIO_NAMESPACE" \
+  ; do
+    if kubectl get namespace "$ns" &>/dev/null; then
+      collect_namespace_pod_logs "$ns" "$ARTIFACTS_DIR/pod-logs/$ns"
+    else
+      echo "  Skipping namespace $ns (not found)"
+    fi
+  done
   echo "=============================================="
 }
 
@@ -203,18 +311,95 @@ run_auth_debug_report() {
 
   _section "maas-controller"
   _run "maas-controller pods" "kubectl get pods -n $DEPLOYMENT_NAMESPACE -l app=maas-controller -o wide 2>/dev/null || true"
-  _run "maas-controller MAAS_API_NAMESPACE" \
-    "kubectl get deployment maas-controller -n $DEPLOYMENT_NAMESPACE -o jsonpath='{.spec.template.spec.containers[0].env}' 2>/dev/null | jq -r '.[] | select(.name==\"MAAS_API_NAMESPACE\") | \"\(.name)=\(.value // .valueFrom.fieldRef.fieldPath // \"N/A\")\"' 2>/dev/null || echo 'N/A'"
+
+  local env_display
+  env_display=$(kubectl get deployment maas-controller -n $DEPLOYMENT_NAMESPACE -o jsonpath='{.spec.template.spec.containers[0].env}' 2>/dev/null | jq -r '.[] | select(.name=="MAAS_API_NAMESPACE") | if .value then "\(.name)=\(.value)" elif .valueFrom.fieldRef.fieldPath then "\(.name)=\(.valueFrom.fieldRef.fieldPath) (resolves to: '"$DEPLOYMENT_NAMESPACE"')" else "\(.name)=N/A" end' 2>/dev/null || echo 'MAAS_API_NAMESPACE=N/A')
+  _run "maas-controller MAAS_API_NAMESPACE" "echo '$env_display'"
   _append ""
 
-  _section "Kuadrant AuthPolicies"
+  _section "Kuadrant Policies"
   _run "AuthPolicies (all namespaces)" "kubectl get authpolicies -A -o wide 2>/dev/null || true"
+  _run "TokenRateLimitPolicies (all namespaces)" "kubectl get tokenratelimitpolicies -A -o wide 2>/dev/null || true"
   _append ""
 
   _section "MaaS CRs"
   _run "MaaSAuthPolicies" "kubectl get maasauthpolicies -n $MAAS_SUBSCRIPTION_NAMESPACE -o wide 2>/dev/null || true"
   _run "MaaSSubscriptions" "kubectl get maassubscriptions -n $MAAS_SUBSCRIPTION_NAMESPACE -o wide 2>/dev/null || true"
-  _run "MaaSModelRefs" "kubectl get maasmodelrefs -n $DEPLOYMENT_NAMESPACE -o wide 2>/dev/null || true"
+  _run "MaaSSubscription status details" "kubectl get maassubscriptions -n $MAAS_SUBSCRIPTION_NAMESPACE -o jsonpath='{range .items[*]}{.metadata.name}: {.status.phase} - {.status.conditions[?(@.type==\"Ready\")].message}{\"\\n\"}{end}' 2>/dev/null || true"
+  _run "MaaSModelRefs (all namespaces)" "kubectl get maasmodelrefs -A -o wide 2>/dev/null || true"
+  _run "Tenants" "kubectl get tenants -n $MAAS_SUBSCRIPTION_NAMESPACE -o wide 2>/dev/null || true"
+  _run "Tenant status details" "kubectl get tenants -n $MAAS_SUBSCRIPTION_NAMESPACE -o jsonpath='{range .items[*]}{.metadata.name}: {.status.conditions[?(@.type==\"Ready\")].status} - {.status.conditions[?(@.type==\"Ready\")].message}{\"\\n\"}{end}' 2>/dev/null || true"
+  _append ""
+
+  _section "Test User Information"
+  local test_token
+  test_token=$(oc whoami -t 2>/dev/null || echo "")
+  if [[ -n "$test_token" ]]; then
+    _append "Test user token available: yes"
+
+    # Try to get user info from token review
+    local user_info
+    user_info=$(kubectl create --dry-run=server --raw /apis/authentication.k8s.io/v1/tokenreviews -f - <<EOF 2>/dev/null | jq -r '.status.user // empty'
+{
+  "apiVersion": "authentication.k8s.io/v1",
+  "kind": "TokenReview",
+  "spec": {
+    "token": "$test_token"
+  }
+}
+EOF
+)
+    if [[ -n "$user_info" ]]; then
+      local username groups
+      username=$(echo "$user_info" | jq -r '.username // "N/A"')
+      groups=$(echo "$user_info" | jq -r '.groups // [] | join(", ")')
+      _append "  Username: $username"
+      _append "  Groups: $groups"
+    else
+      _append "  Could not retrieve user info from token"
+    fi
+  else
+    _append "No test token available (not logged in via oc)"
+  fi
+  _append ""
+
+  _section "Subscription → Model Mapping"
+  local subscriptions_json sub_mapping
+  subscriptions_json=$(kubectl get maassubscriptions -n $MAAS_SUBSCRIPTION_NAMESPACE -o json 2>/dev/null | jq -r '.items // []' 2>/dev/null)
+  if [[ -n "$subscriptions_json" ]] && [[ "$subscriptions_json" != "[]" ]]; then
+    sub_mapping=$(echo "$subscriptions_json" | jq -r '.[] |
+      "Subscription: " + .metadata.name +
+      "\n  Owner users: " + ((.spec.owner.users // []) | join(", ") | if . == "" then "(none)" else . end) +
+      "\n  Owner groups: " + ((.spec.owner.groups // [] | map(.name)) | join(", ") | if . == "" then "(none)" else . end) +
+      "\n  Models: " + ((.spec.modelRefs // [] | map(.namespace + "/" + .name)) | join(", ") | if . == "" then "(none)" else . end)' 2>/dev/null)
+    if [[ -n "$sub_mapping" ]]; then
+      _append "$sub_mapping"
+    else
+      _append "Failed to parse subscription data"
+    fi
+  else
+    _append "No subscriptions found in $MAAS_SUBSCRIPTION_NAMESPACE"
+  fi
+  _append ""
+
+  _section "Available Models (MaaSModelRefs)"
+  local models_json model_listing
+  models_json=$(kubectl get maasmodelrefs -A -o json 2>/dev/null | jq -r '.items // []' 2>/dev/null)
+  if [[ -n "$models_json" ]] && [[ "$models_json" != "[]" ]]; then
+    _append "Model Reference → Model ID / Endpoint"
+    model_listing=$(echo "$models_json" | jq -r '.[] |
+      "  " + .metadata.namespace + "/" + .metadata.name +
+      " → " + (.spec.modelRef.name // "N/A") +
+      " (" + (.status.phase // "unknown") + ")" +
+      if .status.endpoint then "\n    Endpoint: " + .status.endpoint else "" end' 2>/dev/null)
+    if [[ -n "$model_listing" ]]; then
+      _append "$model_listing"
+    else
+      _append "Failed to parse model data"
+    fi
+  else
+    _append "No MaaSModelRefs found"
+  fi
   _append ""
 
   _section "Gateway / HTTPRoutes"
@@ -226,14 +411,66 @@ run_auth_debug_report() {
   _run "Authorino pods" "kubectl get pods -n $AUTHORINO_NAMESPACE -l 'app.kubernetes.io/name=authorino' --no-headers 2>/dev/null; kubectl get pods -n openshift-ingress -l 'app.kubernetes.io/name=authorino' --no-headers 2>/dev/null; echo '---'; kubectl get pods -A -l 'app.kubernetes.io/name=authorino' -o wide 2>/dev/null || true"
   _append ""
 
-  # Determine maas-api namespace
+  # Determine maas-api namespace from controller deployment
   local maas_api_ns
-  maas_api_ns=$(kubectl get deployment maas-controller -n $DEPLOYMENT_NAMESPACE -o jsonpath='{.spec.template.spec.containers[0].env}' 2>/dev/null | jq -r '.[] | select(.name=="MAAS_API_NAMESPACE") | .value' 2>/dev/null || echo "$DEPLOYMENT_NAMESPACE")
-  [[ -z "$maas_api_ns" ]] && maas_api_ns="$DEPLOYMENT_NAMESPACE"
+  local env_json
+  env_json=$(kubectl get deployment maas-controller -n $DEPLOYMENT_NAMESPACE -o jsonpath='{.spec.template.spec.containers[0].env}' 2>/dev/null || echo "[]")
 
-  local sub_select_url="https://maas-api.${maas_api_ns}.svc.cluster.local:8443/v1/subscriptions/select"
+  # Try to get direct .value first
+  maas_api_ns=$(echo "$env_json" | jq -r '.[] | select(.name=="MAAS_API_NAMESPACE") | .value // empty' 2>/dev/null)
+
+  # If empty, check if using fieldRef (downward API)
+  if [[ -z "$maas_api_ns" ]]; then
+    local field_path
+    field_path=$(echo "$env_json" | jq -r '.[] | select(.name=="MAAS_API_NAMESPACE") | .valueFrom.fieldRef.fieldPath // empty' 2>/dev/null)
+    if [[ "$field_path" == "metadata.namespace" ]]; then
+      # Using downward API - the value is the controller's namespace
+      maas_api_ns="$DEPLOYMENT_NAMESPACE"
+    fi
+  fi
+
+  # Fallback to deployment namespace if still empty
+  [[ -z "$maas_api_ns" ]] && maas_api_ns="$DEPLOYMENT_NAMESPACE" || true
+
+  local sub_select_url="https://maas-api.${maas_api_ns}.svc.cluster.local:8443/internal/v1/subscriptions/select"
   _section "Subscription Selector Endpoint Validation"
   _append "Expected URL (from maas-controller config): $sub_select_url"
+  _append "  (MAAS_API_NAMESPACE resolved to: $maas_api_ns)"
+  _append ""
+
+  # Verify actual AuthPolicy configuration
+  _append "--- Sample AuthPolicy subscription-info configuration ---"
+  local sample_policy_json
+  sample_policy_json=$(kubectl get authpolicies -A -l 'app.kubernetes.io/managed-by=maas-controller' -o json 2>/dev/null | jq -r '.items[0] // empty' 2>/dev/null)
+
+  if [[ -n "$sample_policy_json" ]]; then
+    local policy_name policy_ns
+    policy_name=$(echo "$sample_policy_json" | jq -r '.metadata.name // "unknown"')
+    policy_ns=$(echo "$sample_policy_json" | jq -r '.metadata.namespace // "unknown"')
+    _append "  Inspecting: $policy_ns/$policy_name"
+
+    local actual_url
+    actual_url=$(echo "$sample_policy_json" | jq -r '.spec.rules.metadata."subscription-info".http.url // "N/A"' 2>/dev/null)
+    _append "  Actual URL in AuthPolicy: $actual_url"
+
+    local request_body
+    request_body=$(echo "$sample_policy_json" | jq -r '.spec.rules.metadata."subscription-info".http.body.expression // "N/A"' 2>/dev/null)
+    if echo "$request_body" | grep -q "requestedModel"; then
+      _append "  ✅ Request body includes requestedModel field"
+      # Extract the model reference from the body
+      local model_ref
+      model_ref=$(echo "$request_body" | grep -o '"requestedModel"[^"]*"[^"]*"' | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+      if [[ -n "$model_ref" ]]; then
+        _append "  Model reference: $model_ref"
+      fi
+    else
+      _append "  ❌ Request body MISSING requestedModel field (should include model namespace/name)"
+    fi
+    _append "  Request body preview:"
+    _append "$(echo "$request_body" | head -5 | sed 's/^/    /')"
+  else
+    _append "  No managed AuthPolicies found"
+  fi
   _append ""
 
   local curl_ns="$AUTHORINO_NAMESPACE"
@@ -261,6 +498,24 @@ run_auth_debug_report() {
   _append "$dns_out"
   _append ""
 
+  _section "Configuration Summary"
+  _append "This summary helps compare local vs CI runs:"
+  _append ""
+  local total_models total_subs total_authpolicies total_kuadrant_authpolicies
+  total_models=$(echo "$models_json" | jq '. | length' 2>/dev/null || echo "0")
+  total_subs=$(echo "$subscriptions_json" | jq '. | length' 2>/dev/null || echo "0")
+  total_authpolicies=$(kubectl get maasauthpolicies -n $MAAS_SUBSCRIPTION_NAMESPACE -o json 2>/dev/null | jq -r '.items | length' 2>/dev/null || echo "0")
+  total_kuadrant_authpolicies=$(kubectl get authpolicies -A -l 'app.kubernetes.io/managed-by=maas-controller' -o json 2>/dev/null | jq -r '.items | length' 2>/dev/null || echo "0")
+
+  _append "  MaaSModelRefs (all namespaces): $total_models"
+  _append "  MaaSSubscriptions ($MAAS_SUBSCRIPTION_NAMESPACE): $total_subs"
+  _append "  MaaSAuthPolicies ($MAAS_SUBSCRIPTION_NAMESPACE): $total_authpolicies"
+  _append "  Generated Kuadrant AuthPolicies: $total_kuadrant_authpolicies"
+  _append ""
+  _append "  Subscription selector URL: $sub_select_url"
+  _append "  Test user: $(oc whoami 2>/dev/null || echo 'N/A')"
+  _append ""
+
   echo "$OUTPUT"
 }
 
@@ -276,11 +531,16 @@ main() {
     patch_authorino_debug
     return 0
   fi
-  # Default: collect artifacts, then print auth debug report
+  # Default: collect artifacts, then print auth debug report (also saved to file)
   collect_e2e_artifacts
   echo ""
-  echo "========== Auth Debug Report =========="
-  run_auth_debug_report
+  echo "========== MaaS Debug Report =========="
+  local report
+  report=$(run_auth_debug_report)
+  echo "$report"
+  mkdir -p "$ARTIFACTS_DIR"
+  echo "$report" > "$ARTIFACTS_DIR/maas-debug-report.log"
+  echo "MaaS debug report saved to $ARTIFACTS_DIR/maas-debug-report.log"
 }
 
 # Run main only when executed directly (not sourced)

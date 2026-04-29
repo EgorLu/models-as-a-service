@@ -5,8 +5,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/env"
 
@@ -26,6 +28,8 @@ type Config struct {
 	GatewayName      string
 	GatewayNamespace string
 
+	MaaSSubscriptionNamespace string
+
 	// Server configuration
 	Address string // Listen address for HTTPS (host:port)
 	Secure  bool   // Use HTTPS
@@ -37,14 +41,20 @@ type Config struct {
 	// Format: postgresql://user:password@host:port/database
 	DBConnectionURL string
 
-	// APIKeyExpirationPolicy controls whether API keys must have expiration
-	// Values: "optional" (default) or "required"
-	APIKeyExpirationPolicy string
-
 	// APIKeyMaxExpirationDays is the maximum allowed expiration in days for API keys.
 	// Users cannot create API keys with expiration longer than this value.
 	// Default: 30 days. Minimum: 1 day.
 	APIKeyMaxExpirationDays int
+
+	// AccessCheckTimeoutSeconds bounds the total duration of model access validation.
+	// This limits the staleness window between when access is checked and when the
+	// response reaches the client. Models whose probes don't complete within this
+	// window are excluded (fail-closed). Default: 15 seconds. Minimum: 1 second.
+	AccessCheckTimeoutSeconds int
+
+	// SARCacheMaxSize is the maximum number of entries in the SAR admin-check cache.
+	// Bounds memory usage under high-cardinality user traffic. Default: 8192.
+	SARCacheMaxSize int
 
 	// Deprecated flag (backward compatibility with pre-TLS version)
 	deprecatedHTTPPort string
@@ -56,19 +66,23 @@ func Load() *Config {
 	gatewayName := env.GetString("GATEWAY_NAME", constant.DefaultGatewayName)
 	secure, _ := env.GetBool("SECURE", false)
 	maxExpirationDays, _ := env.GetInt("API_KEY_MAX_EXPIRATION_DAYS", constant.DefaultAPIKeyMaxExpirationDays)
+	accessCheckTimeoutSeconds, _ := env.GetInt("ACCESS_CHECK_TIMEOUT_SECONDS", 15)
+	sarCacheMaxSize, _ := env.GetInt("SAR_CACHE_MAX_SIZE", constant.DefaultSARCacheMaxSize)
 
 	c := &Config{
-		Name:                    env.GetString("INSTANCE_NAME", gatewayName),
-		Namespace:               env.GetString("NAMESPACE", constant.DefaultNamespace),
-		GatewayName:             gatewayName,
-		GatewayNamespace:        env.GetString("GATEWAY_NAMESPACE", constant.DefaultGatewayNamespace),
-		Address:                 env.GetString("ADDRESS", ""),
-		Secure:                  secure,
-		TLS:                     loadTLSConfig(),
-		DebugMode:               debugMode,
-		DBConnectionURL:         "", // Loaded from K8s secret via LoadDatabaseURL()
-		APIKeyExpirationPolicy:  env.GetString("API_KEY_EXPIRATION_POLICY", "optional"),
-		APIKeyMaxExpirationDays: maxExpirationDays,
+		Name:                      env.GetString("INSTANCE_NAME", gatewayName),
+		Namespace:                 env.GetString("NAMESPACE", constant.DefaultNamespace),
+		GatewayName:               gatewayName,
+		GatewayNamespace:          env.GetString("GATEWAY_NAMESPACE", constant.DefaultGatewayNamespace),
+		MaaSSubscriptionNamespace: env.GetString("MAAS_SUBSCRIPTION_NAMESPACE", constant.DefaultMaaSSubscriptionNamespace),
+		Address:                   env.GetString("ADDRESS", ""),
+		Secure:                    secure,
+		TLS:                       loadTLSConfig(),
+		DebugMode:                 debugMode,
+		DBConnectionURL:           "", // Loaded from K8s secret via LoadDatabaseURL()
+		APIKeyMaxExpirationDays:   maxExpirationDays,
+		AccessCheckTimeoutSeconds: accessCheckTimeoutSeconds,
+		SARCacheMaxSize:           sarCacheMaxSize,
 		// Deprecated env var (backward compatibility with pre-TLS version)
 		deprecatedHTTPPort: env.GetString("PORT", ""),
 	}
@@ -84,6 +98,7 @@ func (c *Config) bindFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.Namespace, "namespace", c.Namespace, "Namespace of the MaaS instance")
 	fs.StringVar(&c.GatewayName, "gateway-name", c.GatewayName, "Name of the Gateway that has MaaS capabilities")
 	fs.StringVar(&c.GatewayNamespace, "gateway-namespace", c.GatewayNamespace, "Namespace where MaaS-enabled Gateway is deployed")
+	fs.StringVar(&c.MaaSSubscriptionNamespace, "maas-subscription-namespace", c.MaaSSubscriptionNamespace, "Namespace where MaaSSubscription CRs are located")
 
 	fs.StringVar(&c.Address, "address", c.Address, "HTTPS listen address (default :8443)")
 	fs.BoolVar(&c.Secure, "secure", c.Secure, "Use HTTPS (default: false)")
@@ -128,14 +143,20 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Validate API key expiration policy
-	if c.APIKeyExpirationPolicy != "optional" && c.APIKeyExpirationPolicy != "required" {
-		return errors.New("API_KEY_EXPIRATION_POLICY must be 'optional' or 'required'")
+	if strings.TrimSpace(c.MaaSSubscriptionNamespace) == "" {
+		return errors.New("MAAS_SUBSCRIPTION_NAMESPACE must be non-empty")
+	}
+	if errs := validation.IsDNS1123Label(c.MaaSSubscriptionNamespace); len(errs) > 0 {
+		return fmt.Errorf("MAAS_SUBSCRIPTION_NAMESPACE %q is invalid: %v", c.MaaSSubscriptionNamespace, errs)
 	}
 
 	// Validate API key max expiration days
 	if c.APIKeyMaxExpirationDays < 1 {
 		return errors.New("API_KEY_MAX_EXPIRATION_DAYS must be at least 1")
+	}
+
+	if c.AccessCheckTimeoutSeconds < 1 {
+		return errors.New("ACCESS_CHECK_TIMEOUT_SECONDS must be at least 1")
 	}
 
 	return nil

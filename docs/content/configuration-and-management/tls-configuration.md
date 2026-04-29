@@ -46,11 +46,23 @@ Authorino handles two TLS-protected traffic flows:
 
 For ODH/RHOAI deployments, the inbound flow is a [platform pre-requisite](https://github.com/opendatahub-io/kserve/tree/release-v0.15/docs/samples/llmisvc/ocp-setup-for-GA#ssl-authorino) for secure `LLMInferenceService` communication; only the outbound configuration is needed for MaaS.
 
-For all deployments using `./scripts/deploy.sh` (both operator and kustomize modes with TLS enabled), both flows are configured automatically via `configure-authorino-tls.sh`.
+For all deployments using `./scripts/deploy.sh` (both operator and kustomize modes with TLS enabled), both flows are configured automatically via `scripts/setup-authorino-tls.sh`.
+
+!!! warning "Authorino TLS script modifies operator-managed resources"
+    The `scripts/setup-authorino-tls.sh` script patches Authorino's service and deployment directly. When run (automatically by `deploy.sh` or manually), it will annotate the Authorino service, patch the Authorino CR, and add environment variables to the Authorino deployment. Use `--disable-tls-backend` with `deploy.sh` to skip this if you manage Authorino TLS separately.
 
 #### Gateway → Authorino (Listener TLS)
 
 Enables TLS on Authorino's gRPC listener for incoming authentication requests from the Gateway.
+
+**Quick setup:** Run the standalone script (or let `deploy.sh` run it automatically):
+
+```bash
+./scripts/setup-authorino-tls.sh
+# Use AUTHORINO_NAMESPACE=rh-connectivity-link for RHCL
+```
+
+**Manual configuration:**
 
 ```bash
 # Annotate service for certificate generation
@@ -106,7 +118,7 @@ spec:
 
 #### Authorino → maas-api (Outbound TLS)
 
-Enables Authorino to make HTTPS calls to `maas-api` for tier metadata lookups. Requires the cluster CA bundle and SSL environment variables.
+Enables Authorino to make HTTPS calls to `maas-api` for API key validation and metadata lookups. Requires the cluster CA bundle and SSL environment variables.
 
 ```bash
 # Configure SSL environment variables for outbound HTTPS
@@ -140,12 +152,14 @@ This section covers how `maas-api` is configured to use TLS certificates. These 
 
 The `maas-api` component accepts TLS configuration via environment variables:
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `TLS_CERT` | Path to TLS certificate file | `/etc/maas-api/tls/tls.crt` |
-| `TLS_KEY` | Path to TLS private key file | `/etc/maas-api/tls/tls.key` |
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `TLS_CERT` | Path to TLS certificate file | (none) | `/etc/maas-api/tls/tls.crt` |
+| `TLS_KEY` | Path to TLS private key file | (none) | `/etc/maas-api/tls/tls.key` |
+| `TLS_SELF_SIGNED` | Generate a self-signed certificate at startup | `false` | `true` |
+| `TLS_MIN_VERSION` | Minimum accepted TLS version (`1.2` or `1.3`) | `1.2` | `1.3` |
 
-When both variables are set, the API server listens on HTTPS (port 8443) instead of HTTP (port 8080).
+When `TLS_CERT` and `TLS_KEY` are both set, the API server listens on HTTPS (port 8443) instead of HTTP (port 8080). If `TLS_SELF_SIGNED` is set to `true`, a self-signed certificate is generated automatically and explicit cert/key paths are not required. When both cert/key files and `TLS_SELF_SIGNED` are provided, the cert/key files take precedence.
 
 ### Volume Mounts
 
@@ -177,9 +191,8 @@ Pre-configured overlays are available for common scenarios:
 | Overlay | Description |
 |---------|-------------|
 | `deployment/base/maas-api/overlays/tls` | Base TLS overlay for maas-api (deployment patch, service annotation, DestinationRule) |
-| `deployment/overlays/tls-backend` | Full TLS deployment with Authorino configuration |
-| `deployment/overlays/tls-backend-disk` | TLS + persistent storage (PVC) |
-| `deployment/overlays/http-backend` | HTTP only (development/testing) |
+| `maas-api/deploy/overlays/odh` | Tenant reconciler overlay (TLS, gateway policies, shared-patches) |
+| `deployment/overlays/odh` | ODH operator overlay (TLS, controller, gateway policies, observability) |
 
 The `tls` base overlay includes:
 
@@ -189,11 +202,9 @@ The `tls` base overlay includes:
 | `service-patch.yaml` | Add serving-cert annotation, expose port 8443 |
 | `destinationrule.yaml` | Configure gateway TLS to maas-api backend |
 
-Deploy using:
-
-```bash
-kustomize build deployment/overlays/tls-backend | kubectl apply -f -
-```
+maas-api is deployed by the Tenant reconciler in `maas-controller`. The `deploy.sh` script
+installs prerequisites (policy engine, PostgreSQL, Authorino TLS) and then deploys
+`maas-controller`, which creates the `default-tenant` CR and reconciles maas-api via SSA.
 
 ## Verifying TLS Configuration
 

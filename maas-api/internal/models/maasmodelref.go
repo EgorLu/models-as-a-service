@@ -7,6 +7,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"knative.dev/pkg/apis"
+
+	"github.com/opendatahub-io/models-as-a-service/maas-api/internal/constant"
 )
 
 const (
@@ -17,16 +19,16 @@ const (
 
 // MaaSModelRefLister lists MaaSModelRef CRs from a cache (e.g. informer-backed). Used for GET /v1/models.
 type MaaSModelRefLister interface {
-	// List returns MaaSModelRef unstructured items in the given namespace.
-	List(namespace string) ([]*unstructured.Unstructured, error)
+	// List returns all MaaSModelRef unstructured items from all namespaces.
+	List() ([]*unstructured.Unstructured, error)
 }
 
 // ListFromMaaSModelRefLister converts cached MaaSModelRef items to API models. Uses status.endpoint and status.phase.
-func ListFromMaaSModelRefLister(lister MaaSModelRefLister, namespace string) ([]Model, error) {
-	if lister == nil || namespace == "" {
+func ListFromMaaSModelRefLister(lister MaaSModelRefLister) ([]Model, error) {
+	if lister == nil {
 		return nil, nil
 	}
-	items, err := lister.List(namespace)
+	items, err := lister.List()
 	if err != nil {
 		return nil, err
 	}
@@ -58,6 +60,19 @@ func maasModelRefToModel(u *unstructured.Unstructured) *Model {
 	if kind == "" {
 		kind = "llmisvc"
 	}
+	annotations := u.GetAnnotations()
+	var details *Details
+	if annotations != nil {
+		d := Details{
+			DisplayName:   annotations[constant.AnnotationDisplayName],
+			Description:   annotations[constant.AnnotationDescription],
+			GenAIUseCase:  annotations[constant.AnnotationGenAIUseCase],
+			ContextWindow: annotations[constant.AnnotationContextWindow],
+		}
+		if d.DisplayName != "" || d.Description != "" || d.GenAIUseCase != "" || d.ContextWindow != "" {
+			details = &d
+		}
+	}
 
 	var urlPtr *apis.URL
 	if endpoint != "" {
@@ -72,15 +87,19 @@ func maasModelRefToModel(u *unstructured.Unstructured) *Model {
 		created = t.Unix()
 	}
 
+	namespace := u.GetNamespace()
+	// OwnedBy includes both namespace and MaaSModelRef name for dashboard display
+	ownedBy := namespace + "/" + name
 	return &Model{
 		Model: openai.Model{
 			ID:      name,
 			Object:  "model",
 			Created: created,
-			OwnedBy: u.GetNamespace(),
+			OwnedBy: ownedBy,
 		},
-		Kind:  kind,
-		URL:   urlPtr,
-		Ready: ready,
+		Kind:    kind,
+		URL:     urlPtr,
+		Ready:   ready,
+		Details: details,
 	}
 }

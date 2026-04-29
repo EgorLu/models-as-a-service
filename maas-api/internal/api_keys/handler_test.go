@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -17,8 +18,45 @@ import (
 
 	"github.com/opendatahub-io/models-as-a-service/maas-api/internal/config"
 	"github.com/opendatahub-io/models-as-a-service/maas-api/internal/logger"
+	"github.com/opendatahub-io/models-as-a-service/maas-api/internal/subscription"
 	"github.com/opendatahub-io/models-as-a-service/maas-api/internal/token"
 )
+
+const testSubscriptionName = "test-subscription"
+
+// fixedSubSelector satisfies SubscriptionSelector for handler tests (no cluster subscriptions).
+type fixedSubSelector struct{}
+
+func (fixedSubSelector) Select(_ []string, _ string, requested string, _ string) (*subscription.SelectResponse, error) {
+	if requested != "" {
+		return &subscription.SelectResponse{Name: requested, Phase: "Active"}, nil
+	}
+	return &subscription.SelectResponse{Name: testSubscriptionName, Phase: "Active"}, nil
+}
+
+func (fixedSubSelector) SelectHighestPriority(_ []string, _ string) (*subscription.SelectResponse, error) {
+	return &subscription.SelectResponse{Name: testSubscriptionName, Phase: "Active"}, nil
+}
+
+// errSubSelector returns fixed errors from Select / SelectHighestPriority (for handler HTTP mapping tests).
+type errSubSelector struct {
+	selectErr          error
+	highestPriorityErr error
+}
+
+func (e errSubSelector) Select(_ []string, _ string, _ string, _ string) (*subscription.SelectResponse, error) {
+	if e.selectErr != nil {
+		return nil, e.selectErr
+	}
+	return &subscription.SelectResponse{Name: "stub-sub", Phase: "Active"}, nil
+}
+
+func (e errSubSelector) SelectHighestPriority(_ []string, _ string) (*subscription.SelectResponse, error) {
+	if e.highestPriorityErr != nil {
+		return nil, e.highestPriorityErr
+	}
+	return &subscription.SelectResponse{Name: testSubscriptionName, Phase: "Active"}, nil
+}
 
 // Test constants.
 const (
@@ -26,6 +64,7 @@ const (
 )
 
 // mockAdminChecker is a simple mock for testing that checks if user has "admin-users" group.
+// This simulates the SAR check by checking group membership (for test simplicity).
 type mockAdminChecker struct {
 	adminGroups []string
 }
@@ -36,13 +75,16 @@ func newMockAdminChecker() *mockAdminChecker {
 	}
 }
 
-func (m *mockAdminChecker) IsAdmin(userGroups []string) bool {
-	for _, userGroup := range userGroups {
+func (m *mockAdminChecker) IsAdmin(_ context.Context, user *token.UserContext) (bool, error) {
+	if user == nil {
+		return false, nil
+	}
+	for _, userGroup := range user.Groups {
 		if slices.Contains(m.adminGroups, userGroup) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // executeSearchRequest is a test helper that executes a search request and returns the parsed response.
@@ -68,20 +110,27 @@ func TestIsAuthorizedForKey(t *testing.T) {
 	h := &Handler{
 		adminChecker: newMockAdminChecker(),
 	}
+	ctx := context.Background()
 
 	t.Run("OwnerCanAccess", func(t *testing.T) {
 		user := &token.UserContext{Username: "alice", Groups: []string{"users"}}
-		assert.True(t, h.isAuthorizedForKey(user, "alice"))
+		result, err := h.isAuthorizedForKey(ctx, user, "alice")
+		require.NoError(t, err)
+		assert.True(t, result)
 	})
 
 	t.Run("NonOwnerCannotAccess", func(t *testing.T) {
 		user := &token.UserContext{Username: "bob", Groups: []string{"users"}}
-		assert.False(t, h.isAuthorizedForKey(user, "alice"))
+		result, err := h.isAuthorizedForKey(ctx, user, "alice")
+		require.NoError(t, err)
+		assert.False(t, result)
 	})
 
 	t.Run("AdminCanAccessAnyKey", func(t *testing.T) {
 		admin := &token.UserContext{Username: "admin", Groups: []string{"admin-users"}}
-		assert.True(t, h.isAuthorizedForKey(admin, "alice"))
+		result, err := h.isAuthorizedForKey(ctx, admin, "alice")
+		require.NoError(t, err)
+		assert.True(t, result)
 	})
 }
 
@@ -93,7 +142,7 @@ func TestSearchAPIKeys_EmptyRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := NewMockStore()
 	cfg := &config.Config{}
-	service := NewServiceWithLogger(store, cfg, logger.Development())
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
 	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
 
 	testUser := &token.UserContext{
@@ -103,12 +152,12 @@ func TestSearchAPIKeys_EmptyRequest(t *testing.T) {
 
 	// Create test keys
 	ctx := context.Background()
-	err := store.AddKey(ctx, testUser.Username, "key-1", "hash-1", "Key 1", "", []string{"system:authenticated"}, nil)
+	err := store.AddKey(ctx, testUser.Username, "key-1", "hash-1", "Key 1", "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 	require.NoError(t, err)
-	err = store.AddKey(ctx, testUser.Username, "key-2", "hash-2", "Key 2", "", []string{"system:authenticated"}, nil)
+	err = store.AddKey(ctx, testUser.Username, "key-2", "hash-2", "Key 2", "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 	require.NoError(t, err)
 	// Create a revoked key
-	err = store.AddKey(ctx, testUser.Username, "key-3", "hash-3", "Key 3", "", []string{"system:authenticated"}, nil)
+	err = store.AddKey(ctx, testUser.Username, "key-3", "hash-3", "Key 3", "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 	require.NoError(t, err)
 	err = store.Revoke(ctx, "key-3")
 	require.NoError(t, err)
@@ -139,7 +188,7 @@ func TestSearchAPIKeys_Pagination(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := NewMockStore()
 	cfg := &config.Config{}
-	service := NewServiceWithLogger(store, cfg, logger.Development())
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
 	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
 
 	testUser := &token.UserContext{
@@ -153,7 +202,7 @@ func TestSearchAPIKeys_Pagination(t *testing.T) {
 		keyID := fmt.Sprintf("key-%d", i)
 		keyHash := fmt.Sprintf("hash-%d", i)
 		name := fmt.Sprintf("Key %d", i)
-		err := store.AddKey(ctx, testUser.Username, keyID, keyHash, name, "", []string{"system:authenticated"}, nil)
+		err := store.AddKey(ctx, testUser.Username, keyID, keyHash, name, "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 		require.NoError(t, err)
 	}
 
@@ -243,7 +292,7 @@ func TestSearchAPIKeys_StatusFilter(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := NewMockStore()
 	cfg := &config.Config{}
-	service := NewServiceWithLogger(store, cfg, logger.Development())
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
 	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
 
 	ctx := context.Background()
@@ -253,9 +302,9 @@ func TestSearchAPIKeys_StatusFilter(t *testing.T) {
 	}
 
 	// Create active and revoked keys
-	err := store.AddKey(ctx, testUser.Username, "active-key", "active-hash", "Active Key", "", []string{"system:authenticated"}, nil)
+	err := store.AddKey(ctx, testUser.Username, "active-key", "active-hash", "Active Key", "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 	require.NoError(t, err)
-	err = store.AddKey(ctx, testUser.Username, "revoked-key", "revoked-hash", "Revoked Key", "", []string{"system:authenticated"}, nil)
+	err = store.AddKey(ctx, testUser.Username, "revoked-key", "revoked-hash", "Revoked Key", "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 	require.NoError(t, err)
 	err = store.Revoke(ctx, "revoked-key")
 	require.NoError(t, err)
@@ -369,7 +418,7 @@ func TestSearchAPIKeys_Sorting(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := NewMockStore()
 	cfg := &config.Config{}
-	service := NewServiceWithLogger(store, cfg, logger.Development())
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
 	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
 
 	ctx := context.Background()
@@ -379,11 +428,11 @@ func TestSearchAPIKeys_Sorting(t *testing.T) {
 	}
 
 	// Create keys with different names
-	err := store.AddKey(ctx, testUser.Username, "key-1", "hash-1", "Charlie", "", []string{"system:authenticated"}, nil)
+	err := store.AddKey(ctx, testUser.Username, "key-1", "hash-1", "Charlie", "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 	require.NoError(t, err)
-	err = store.AddKey(ctx, testUser.Username, "key-2", "hash-2", "Alice", "", []string{"system:authenticated"}, nil)
+	err = store.AddKey(ctx, testUser.Username, "key-2", "hash-2", "Alice", "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 	require.NoError(t, err)
-	err = store.AddKey(ctx, testUser.Username, "key-3", "hash-3", "Bob", "", []string{"system:authenticated"}, nil)
+	err = store.AddKey(ctx, testUser.Username, "key-3", "hash-3", "Bob", "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 	require.NoError(t, err)
 
 	t.Run("DefaultSort_CreatedAtDesc", func(t *testing.T) {
@@ -494,7 +543,7 @@ func TestSearchAPIKeys_AdminVsRegularUser(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := NewMockStore()
 	cfg := &config.Config{}
-	service := NewServiceWithLogger(store, cfg, logger.Development())
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
 	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
 
 	ctx := context.Background()
@@ -506,7 +555,7 @@ func TestSearchAPIKeys_AdminVsRegularUser(t *testing.T) {
 			keyID := fmt.Sprintf("%s-key-%d", username, i)
 			keyHash := fmt.Sprintf("%s-hash-%d", username, i)
 			name := fmt.Sprintf("%s Key %d", username, i)
-			err := store.AddKey(ctx, username, keyID, keyHash, name, "", []string{"system:authenticated"}, nil)
+			err := store.AddKey(ctx, username, keyID, keyHash, name, "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 			require.NoError(t, err)
 		}
 	}
@@ -614,7 +663,7 @@ func TestSearchAPIKeys_AdminFiltersByUsernameAndStatus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := NewMockStore()
 	cfg := &config.Config{}
-	service := NewServiceWithLogger(store, cfg, logger.Development())
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
 	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
 
 	ctx := context.Background()
@@ -627,14 +676,14 @@ func TestSearchAPIKeys_AdminFiltersByUsernameAndStatus(t *testing.T) {
 			keyID := fmt.Sprintf("%s-active-%d", username, i)
 			keyHash := fmt.Sprintf("%s-hash-active-%d", username, i)
 			name := fmt.Sprintf("%s Active Key %d", username, i)
-			err := store.AddKey(ctx, username, keyID, keyHash, name, "", []string{"system:authenticated"}, nil)
+			err := store.AddKey(ctx, username, keyID, keyHash, name, "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 			require.NoError(t, err)
 		}
 		// Create 1 revoked key
 		keyID := fmt.Sprintf("%s-revoked", username)
 		keyHash := fmt.Sprintf("%s-hash-revoked", username)
 		name := fmt.Sprintf("%s Revoked Key", username)
-		err := store.AddKey(ctx, username, keyID, keyHash, name, "", []string{"system:authenticated"}, nil)
+		err := store.AddKey(ctx, username, keyID, keyHash, name, "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 		require.NoError(t, err)
 		err = store.Revoke(ctx, keyID)
 		require.NoError(t, err)
@@ -697,7 +746,7 @@ func TestBulkRevokeAPIKeys(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := NewMockStore()
 	cfg := &config.Config{}
-	service := NewServiceWithLogger(store, cfg, logger.Development())
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
 	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
 
 	ctx := context.Background()
@@ -707,7 +756,7 @@ func TestBulkRevokeAPIKeys(t *testing.T) {
 		keyID := fmt.Sprintf("alice-key-%d", i)
 		keyHash := fmt.Sprintf("alice-hash-%d", i)
 		name := fmt.Sprintf("Alice Key %d", i)
-		err := store.AddKey(ctx, "alice", keyID, keyHash, name, "", []string{"system:authenticated"}, nil)
+		err := store.AddKey(ctx, "alice", keyID, keyHash, name, "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 		require.NoError(t, err)
 	}
 
@@ -715,7 +764,7 @@ func TestBulkRevokeAPIKeys(t *testing.T) {
 		keyID := fmt.Sprintf("bob-key-%d", i)
 		keyHash := fmt.Sprintf("bob-hash-%d", i)
 		name := fmt.Sprintf("Bob Key %d", i)
-		err := store.AddKey(ctx, "bob", keyID, keyHash, name, "", []string{"system:authenticated"}, nil)
+		err := store.AddKey(ctx, "bob", keyID, keyHash, name, "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 		require.NoError(t, err)
 	}
 
@@ -770,7 +819,7 @@ func TestBulkRevokeAPIKeys(t *testing.T) {
 			keyID := fmt.Sprintf("alice-key-%d", i)
 			keyHash := fmt.Sprintf("alice-hash-%d", i)
 			name := fmt.Sprintf("Alice Key %d", i)
-			err := store.AddKey(ctx, "alice", keyID, keyHash, name, "", []string{"system:authenticated"}, nil)
+			err := store.AddKey(ctx, "alice", keyID, keyHash, name, "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
 			require.NoError(t, err)
 		}
 
@@ -851,7 +900,7 @@ func TestUserCanCreateOwnKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := NewMockStore()
 	cfg := &config.Config{}
-	service := NewServiceWithLogger(store, cfg, logger.Development())
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
 	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
 
 	regularUser := &token.UserContext{
@@ -875,11 +924,104 @@ func TestUserCanCreateOwnKey(t *testing.T) {
 	err := json.Unmarshal(w.Body.Bytes(), &response)
 	require.NoError(t, err)
 
+	assert.Equal(t, testSubscriptionName, response.Subscription)
+
 	// Verify key is owned by alice with her actual groups
 	meta, err := store.Get(context.Background(), response.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "alice", meta.Username)
 	assert.Equal(t, []string{"tier-free", "system:authenticated"}, meta.Groups)
+	assert.Equal(t, testSubscriptionName, meta.Subscription)
+}
+
+func TestCreateAPIKey_WithExplicitSubscription(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := NewMockStore()
+	cfg := &config.Config{}
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
+	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
+
+	user := &token.UserContext{Username: "alice", Groups: []string{"system:authenticated"}}
+	body := `{"name": "k1", "subscription": "custom-sub"}`
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/api-keys", nil)
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Body = io.NopCloser(strings.NewReader(body))
+	c.Set("user", user)
+
+	handler.CreateAPIKey(c)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var response CreateAPIKeyResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	assert.Equal(t, "custom-sub", response.Subscription)
+
+	meta, err := store.Get(context.Background(), response.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "custom-sub", meta.Subscription)
+}
+
+func TestCreateAPIKey_SubscriptionSelectErrors(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	user := &token.UserContext{Username: "alice", Groups: []string{"system:authenticated"}}
+
+	tests := []struct {
+		name string
+		sel  errSubSelector
+		body string
+	}{
+		{
+			name: "explicit subscription not found",
+			sel: errSubSelector{
+				selectErr: &subscription.SubscriptionNotFoundError{Subscription: "missing-sub"},
+			},
+			body: `{"name": "k1", "subscription": "missing-sub"}`,
+		},
+		{
+			name: "explicit subscription access denied",
+			sel: errSubSelector{
+				selectErr: &subscription.AccessDeniedError{Subscription: "other-sub"},
+			},
+			body: `{"name": "k1", "subscription": "other-sub"}`,
+		},
+		{
+			name: "no accessible subscription when omitting field",
+			sel: errSubSelector{
+				highestPriorityErr: &subscription.NoSubscriptionError{},
+			},
+			body: `{"name": "k1"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := NewMockStore()
+			cfg := &config.Config{}
+			service := NewServiceWithLogger(store, cfg, tt.sel, logger.Development())
+			h := NewHandler(logger.Development(), service, newMockAdminChecker())
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/api-keys", nil)
+			c.Request.Header.Set("Content-Type", "application/json")
+			c.Request.Body = io.NopCloser(strings.NewReader(tt.body))
+			c.Set("user", user)
+
+			h.CreateAPIKey(c)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			var resp map[string]string
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			assert.Equal(t, apiKeySubscriptionResolutionErrCode, resp["code"])
+			assert.Equal(t, apiKeySubscriptionResolutionErrMsg, resp["error"])
+
+			res, err := store.Search(context.Background(), user.Username, &SearchFilters{}, &SortParams{By: DefaultSortBy, Order: DefaultSortOrder}, &PaginationParams{Limit: 10, Offset: 0})
+			require.NoError(t, err)
+			assert.Empty(t, res.Keys, "no key should be persisted on subscription resolution failure")
+		})
+	}
 }
 
 // ============================================================
@@ -890,7 +1032,7 @@ func TestGetAPIKeyHandler(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := NewMockStore()
 	cfg := &config.Config{}
-	service := NewServiceWithLogger(store, cfg, logger.Development())
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
 	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
 
 	// Create test keys for alice and bob
@@ -912,22 +1054,19 @@ func TestGetAPIKeyHandler(t *testing.T) {
 	}
 
 	// Add keys to store
-	err := store.AddKey(context.Background(), aliceKey.Username, aliceKey.ID, "hash1", aliceKey.Name, "", aliceKey.Groups, nil)
+	err := store.AddKey(context.Background(), aliceKey.Username, aliceKey.ID, "hash1", aliceKey.Name, "", aliceKey.Groups, testSubscriptionName, nil, false)
 	require.NoError(t, err)
-	err = store.AddKey(context.Background(), bobKey.Username, bobKey.ID, "hash2", bobKey.Name, "", bobKey.Groups, nil)
+	err = store.AddKey(context.Background(), bobKey.Username, bobKey.ID, "hash2", bobKey.Name, "", bobKey.Groups, testSubscriptionName, nil, false)
 	require.NoError(t, err)
 
-	t.Run("OwnerCanGetOwnKey", func(t *testing.T) {
-		aliceUser := &token.UserContext{
-			Username: "alice",
-			Groups:   []string{"tier-free"},
-		}
-
+	// Helper function to test successful key retrieval
+	testSuccessfulGetKey := func(t *testing.T, user *token.UserContext, keyID string) {
+		t.Helper()
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest(http.MethodGet, "/v1/api-keys/alice-key-1", nil)
-		c.Set("user", aliceUser)
-		c.Params = gin.Params{{Key: "id", Value: "alice-key-1"}}
+		c.Request = httptest.NewRequest(http.MethodGet, "/v1/api-keys/"+keyID, nil)
+		c.Set("user", user)
+		c.Params = gin.Params{{Key: "id", Value: keyID}}
 
 		handler.GetAPIKey(c)
 
@@ -935,8 +1074,17 @@ func TestGetAPIKeyHandler(t *testing.T) {
 		var response ApiKey
 		err := json.Unmarshal(w.Body.Bytes(), &response)
 		require.NoError(t, err)
-		assert.Equal(t, "alice-key-1", response.ID)
+		assert.Equal(t, keyID, response.ID)
 		assert.Equal(t, "alice", response.Username)
+		assert.Equal(t, testSubscriptionName, response.Subscription)
+	}
+
+	t.Run("OwnerCanGetOwnKey", func(t *testing.T) {
+		aliceUser := &token.UserContext{
+			Username: "alice",
+			Groups:   []string{"tier-free"},
+		}
+		testSuccessfulGetKey(t, aliceUser, "alice-key-1")
 	})
 
 	t.Run("RegularUserCannotGetOthersKey_IDOR_Protection", func(t *testing.T) {
@@ -967,21 +1115,7 @@ func TestGetAPIKeyHandler(t *testing.T) {
 			Username: "admin",
 			Groups:   []string{"admin-users"},
 		}
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest(http.MethodGet, "/v1/api-keys/alice-key-1", nil)
-		c.Set("user", adminUser)
-		c.Params = gin.Params{{Key: "id", Value: "alice-key-1"}}
-
-		handler.GetAPIKey(c)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-		var response ApiKey
-		err := json.Unmarshal(w.Body.Bytes(), &response)
-		require.NoError(t, err)
-		assert.Equal(t, "alice-key-1", response.ID)
-		assert.Equal(t, "alice", response.Username)
+		testSuccessfulGetKey(t, adminUser, "alice-key-1")
 	})
 
 	t.Run("NonExistentKeyReturns404", func(t *testing.T) {
@@ -1011,11 +1145,11 @@ func testRevokeKeySuccess(t *testing.T, user *token.UserContext) {
 	t.Helper()
 	store := NewMockStore()
 	cfg := &config.Config{}
-	service := NewServiceWithLogger(store, cfg, logger.Development())
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
 	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
 
 	// Create alice's key
-	err := store.AddKey(context.Background(), "alice", "alice-key-1", "hash1", "Alice's Key", "", []string{"tier-free"}, nil)
+	err := store.AddKey(context.Background(), "alice", "alice-key-1", "hash1", "Alice's Key", "", []string{"tier-free"}, testSubscriptionName, nil, false)
 	require.NoError(t, err)
 
 	w := httptest.NewRecorder()
@@ -1054,11 +1188,11 @@ func TestRevokeAPIKeyHandler(t *testing.T) {
 	t.Run("RegularUserCannotRevokeOthersKey_IDOR_Protection", func(t *testing.T) {
 		store := NewMockStore()
 		cfg := &config.Config{}
-		service := NewServiceWithLogger(store, cfg, logger.Development())
+		service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
 		handler := NewHandler(logger.Development(), service, newMockAdminChecker())
 
 		// Create alice's key
-		err := store.AddKey(context.Background(), "alice", "alice-key-1", "hash1", "Alice's Key", "", []string{"tier-free"}, nil)
+		err := store.AddKey(context.Background(), "alice", "alice-key-1", "hash1", "Alice's Key", "", []string{"tier-free"}, testSubscriptionName, nil, false)
 		require.NoError(t, err)
 
 		// Bob trying to revoke Alice's key
@@ -1099,7 +1233,7 @@ func TestRevokeAPIKeyHandler(t *testing.T) {
 	t.Run("NonExistentKeyReturns404", func(t *testing.T) {
 		store := NewMockStore()
 		cfg := &config.Config{}
-		service := NewServiceWithLogger(store, cfg, logger.Development())
+		service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
 		handler := NewHandler(logger.Development(), service, newMockAdminChecker())
 
 		aliceUser := &token.UserContext{
@@ -1121,11 +1255,11 @@ func TestRevokeAPIKeyHandler(t *testing.T) {
 	t.Run("CannotRevokeAlreadyRevokedKey", func(t *testing.T) {
 		store := NewMockStore()
 		cfg := &config.Config{}
-		service := NewServiceWithLogger(store, cfg, logger.Development())
+		service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
 		handler := NewHandler(logger.Development(), service, newMockAdminChecker())
 
 		// Create and immediately revoke alice's key
-		err := store.AddKey(context.Background(), "alice", "alice-key-1", "hash1", "Alice's Key", "", []string{"tier-free"}, nil)
+		err := store.AddKey(context.Background(), "alice", "alice-key-1", "hash1", "Alice's Key", "", []string{"tier-free"}, testSubscriptionName, nil, false)
 		require.NoError(t, err)
 		err = store.Revoke(context.Background(), "alice-key-1")
 		require.NoError(t, err)
@@ -1145,5 +1279,394 @@ func TestRevokeAPIKeyHandler(t *testing.T) {
 
 		// Already revoked key returns 404 (not found among active keys)
 		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+}
+
+// ============================================================
+// EPHEMERAL API KEY TESTS
+// ============================================================
+
+func TestCreateEphemeralAPIKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := NewMockStore()
+	cfg := &config.Config{}
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
+	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
+
+	testUser := &token.UserContext{
+		Username: "playground-user",
+		Groups:   []string{"system:authenticated"},
+	}
+
+	t.Run("EphemeralKeyBindsSubscriptionAtMint", func(t *testing.T) {
+		requestBody := `{"ephemeral": true}`
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/api-keys", nil)
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Request.Body = io.NopCloser(strings.NewReader(requestBody))
+		c.Set("user", testUser)
+
+		handler.CreateAPIKey(c)
+
+		require.Equal(t, http.StatusCreated, w.Code)
+		var response CreateAPIKeyResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+
+		assert.Equal(t, testSubscriptionName, response.Subscription,
+			"ephemeral mint response should include bound subscription")
+
+		meta, err := store.Get(context.Background(), response.ID)
+		require.NoError(t, err)
+		assert.Equal(t, testSubscriptionName, meta.Subscription,
+			"stored key metadata should include subscription")
+
+		valResult, err := service.ValidateAPIKey(context.Background(), response.Key)
+		require.NoError(t, err)
+		require.True(t, valResult.Valid, "ephemeral key should validate")
+		assert.Equal(t, testSubscriptionName, valResult.Subscription,
+			"validation result should echo subscription for Authorino")
+	})
+
+	t.Run("EphemeralKeyWithoutName", func(t *testing.T) {
+		requestBody := `{"ephemeral": true}`
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/api-keys", nil)
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Request.Body = io.NopCloser(strings.NewReader(requestBody))
+		c.Set("user", testUser)
+
+		handler.CreateAPIKey(c)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+		var response CreateAPIKeyResponse
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		require.NoError(t, err)
+
+		// Name should be auto-generated
+		assert.Contains(t, response.Name, "ephemeral-")
+		// Expiration should be set (1hr default)
+		assert.NotNil(t, response.ExpiresAt)
+		// Ephemeral flag should be true in response
+		assert.True(t, response.Ephemeral, "ephemeral should be true in response")
+	})
+
+	t.Run("EphemeralKeyWithName", func(t *testing.T) {
+		requestBody := `{"ephemeral": true, "name": "my-playground-key"}`
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/api-keys", nil)
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Request.Body = io.NopCloser(strings.NewReader(requestBody))
+		c.Set("user", testUser)
+
+		handler.CreateAPIKey(c)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+		var response CreateAPIKeyResponse
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		require.NoError(t, err)
+
+		assert.Equal(t, "my-playground-key", response.Name)
+		// Ephemeral flag should be true in response
+		assert.True(t, response.Ephemeral, "ephemeral should be true in response")
+	})
+
+	t.Run("NonEphemeralRequiresName", func(t *testing.T) {
+		requestBody := `{}`
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/api-keys", nil)
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Request.Body = io.NopCloser(strings.NewReader(requestBody))
+		c.Set("user", testUser)
+
+		handler.CreateAPIKey(c)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		var response map[string]string
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		require.NoError(t, err)
+		assert.Contains(t, response["error"], "name is required")
+	})
+
+	t.Run("EphemeralKeyExceedsMaxExpiration", func(t *testing.T) {
+		// Try to create ephemeral key with 2hr expiration (exceeds 1hr max)
+		requestBody := `{"ephemeral": true, "expiresIn": "2h"}`
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/api-keys", nil)
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Request.Body = io.NopCloser(strings.NewReader(requestBody))
+		c.Set("user", testUser)
+
+		handler.CreateAPIKey(c)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		var response map[string]string
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		require.NoError(t, err)
+		assert.Contains(t, response["error"], "cannot exceed 1 hour")
+	})
+}
+
+// ============================================================
+// CLEANUP EXPIRED EPHEMERAL KEYS TESTS (POST /internal/v1/api-keys/cleanup)
+// ============================================================
+
+func TestCleanupExpiredEphemeralKeys(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := NewMockStore()
+	cfg := &config.Config{}
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
+	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
+
+	ctx := context.Background()
+
+	// Create regular active key (should NOT be deleted)
+	err := store.AddKey(ctx, "alice", "regular-key", "hash-1", "Regular Key", "", []string{"users"}, testSubscriptionName, nil, false)
+	require.NoError(t, err)
+
+	// Create active ephemeral key with future expiration (should NOT be deleted)
+	futureExpiry := time.Now().Add(30 * time.Minute)
+	err = store.AddKey(ctx, "alice", "active-ephemeral", "hash-2", "Active Ephemeral", "", []string{"users"}, testSubscriptionName, &futureExpiry, true)
+	require.NoError(t, err)
+
+	// Create expired ephemeral key (should be deleted)
+	pastExpiry := time.Now().Add(-1 * time.Hour)
+	err = store.AddKey(ctx, "alice", "expired-ephemeral", "hash-3", "Expired Ephemeral", "", []string{"users"}, testSubscriptionName, &pastExpiry, true)
+	require.NoError(t, err)
+
+	// Create another expired ephemeral key (should be deleted)
+	pastExpiry2 := time.Now().Add(-2 * time.Hour)
+	err = store.AddKey(ctx, "bob", "expired-ephemeral-2", "hash-4", "Expired Ephemeral 2", "", []string{"users"}, testSubscriptionName, &pastExpiry2, true)
+	require.NoError(t, err)
+
+	// Create expired ephemeral key within 30-minute grace period (should NOT be deleted)
+	recentExpiry := time.Now().Add(-10 * time.Minute)
+	err = store.AddKey(ctx, "alice", "recently-expired-ephemeral", "hash-5", "Recently Expired Ephemeral", "", []string{"users"}, testSubscriptionName, &recentExpiry, true)
+	require.NoError(t, err)
+
+	t.Run("DeletesExpiredEphemeralKeys", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/internal/v1/api-keys/cleanup", nil)
+
+		//nolint:contextcheck // Gin handlers receive *gin.Context which contains the context.
+		handler.CleanupExpiredEphemeralKeys(c)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		var response CleanupResponse
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), response.DeletedCount)
+		assert.Contains(t, response.Message, "2 expired ephemeral key(s)")
+
+		// Verify expired keys are gone
+		_, err = store.Get(ctx, "expired-ephemeral")
+		require.ErrorIs(t, err, ErrKeyNotFound)
+		_, err = store.Get(ctx, "expired-ephemeral-2")
+		require.ErrorIs(t, err, ErrKeyNotFound)
+
+		// Verify regular, active ephemeral, and recently-expired (within grace period) keys still exist
+		_, err = store.Get(ctx, "regular-key")
+		require.NoError(t, err)
+		_, err = store.Get(ctx, "active-ephemeral")
+		require.NoError(t, err)
+		_, err = store.Get(ctx, "recently-expired-ephemeral")
+		require.NoError(t, err)
+	})
+
+	t.Run("NoExpiredKeysReturnsZero", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/internal/v1/api-keys/cleanup", nil)
+
+		handler.CleanupExpiredEphemeralKeys(c)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		var response CleanupResponse
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), response.DeletedCount)
+	})
+}
+
+func TestSearchExcludesEphemeralByDefault(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := NewMockStore()
+	cfg := &config.Config{}
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
+	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
+
+	ctx := context.Background()
+	testUser := &token.UserContext{
+		Username: "test-user",
+		Groups:   []string{"system:authenticated"},
+	}
+
+	// Create regular keys
+	err := store.AddKey(ctx, testUser.Username, "regular-key-1", "hash-1", "Regular Key 1", "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
+	require.NoError(t, err)
+	err = store.AddKey(ctx, testUser.Username, "regular-key-2", "hash-2", "Regular Key 2", "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
+	require.NoError(t, err)
+
+	// Create ephemeral keys
+	futureExpiry := time.Now().Add(1 * time.Hour)
+	err = store.AddKey(ctx, testUser.Username, "ephemeral-key-1", "hash-3", "Ephemeral Key 1", "", []string{"system:authenticated"}, testSubscriptionName, &futureExpiry, true)
+	require.NoError(t, err)
+	err = store.AddKey(ctx, testUser.Username, "ephemeral-key-2", "hash-4", "Ephemeral Key 2", "", []string{"system:authenticated"}, testSubscriptionName, &futureExpiry, true)
+	require.NoError(t, err)
+
+	t.Run("DefaultSearchExcludesEphemeral", func(t *testing.T) {
+		requestBody := `{}`
+		response := executeSearchRequest(t, handler, requestBody, testUser)
+
+		assert.Len(t, response.Data, 2, "should only return regular keys")
+		for _, key := range response.Data {
+			assert.False(t, key.Ephemeral, "should not include ephemeral keys")
+		}
+	})
+
+	t.Run("IncludeEphemeralFilter", func(t *testing.T) {
+		requestBody := `{"filters": {"includeEphemeral": true}}`
+		response := executeSearchRequest(t, handler, requestBody, testUser)
+
+		assert.Len(t, response.Data, 4, "should return all keys including ephemeral")
+
+		ephemeralCount := 0
+		for _, key := range response.Data {
+			if key.Ephemeral {
+				ephemeralCount++
+			}
+		}
+		assert.Equal(t, 2, ephemeralCount, "should have 2 ephemeral keys")
+	})
+}
+
+// TestSearchAPIKeys_ExpiredStatusComputation verifies that keys past their expiration
+// date show "expired" status in search results, even if stored as "active" in the database.
+func TestSearchAPIKeys_ExpiredStatusComputation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := NewMockStore()
+	cfg := &config.Config{}
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
+	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
+
+	ctx := context.Background()
+	testUser := &token.UserContext{
+		Username: "test-user",
+		Groups:   []string{"system:authenticated"},
+	}
+
+	// Create a key that expired yesterday (stored as active, but past expiration)
+	pastExpiry := time.Now().Add(-24 * time.Hour)
+	err := store.AddKey(ctx, testUser.Username, "expired-key", "expired-hash", "Expired Key", "", []string{"system:authenticated"}, testSubscriptionName, &pastExpiry, false)
+	require.NoError(t, err)
+
+	// Create an active key with future expiration
+	futureExpiry := time.Now().Add(24 * time.Hour)
+	err = store.AddKey(ctx, testUser.Username, "active-key", "active-hash", "Active Key", "", []string{"system:authenticated"}, testSubscriptionName, &futureExpiry, false)
+	require.NoError(t, err)
+
+	// Create an active key with no expiration
+	err = store.AddKey(ctx, testUser.Username, "permanent-key", "permanent-hash", "Permanent Key", "", []string{"system:authenticated"}, testSubscriptionName, nil, false)
+	require.NoError(t, err)
+
+	t.Run("SearchReturnsExpiredStatusForPastExpirationKeys", func(t *testing.T) {
+		response := executeSearchRequest(t, handler, `{}`, testUser)
+		assert.Len(t, response.Data, 3)
+
+		statusByID := make(map[string]Status)
+		for _, key := range response.Data {
+			statusByID[key.ID] = key.Status
+		}
+
+		assert.Equal(t, StatusExpired, statusByID["expired-key"], "key past expiration should show expired status")
+		assert.Equal(t, StatusActive, statusByID["active-key"], "key with future expiration should show active status")
+		assert.Equal(t, StatusActive, statusByID["permanent-key"], "key with no expiration should show active status")
+	})
+
+	t.Run("ExpiredFilterIncludesComputedExpiredKeys", func(t *testing.T) {
+		response := executeSearchRequest(t, handler, `{"filters": {"status": ["expired"]}}`, testUser)
+		assert.Len(t, response.Data, 1, "should return only the expired key")
+		assert.Equal(t, "expired-key", response.Data[0].ID)
+		assert.Equal(t, StatusExpired, response.Data[0].Status)
+	})
+
+	t.Run("ActiveFilterExcludesExpiredKeys", func(t *testing.T) {
+		response := executeSearchRequest(t, handler, `{"filters": {"status": ["active"]}}`, testUser)
+		assert.Len(t, response.Data, 2, "should return only active keys (not the expired one)")
+
+		for _, key := range response.Data {
+			assert.Equal(t, StatusActive, key.Status)
+			assert.NotEqual(t, "expired-key", key.ID, "expired key should not appear in active filter")
+		}
+	})
+}
+
+// TestGetAPIKey_ExpiredStatusComputation verifies that getting a single key
+// returns "expired" status if the key is past its expiration date.
+func TestGetAPIKey_ExpiredStatusComputation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := NewMockStore()
+	cfg := &config.Config{}
+	service := NewServiceWithLogger(store, cfg, fixedSubSelector{}, logger.Development())
+	handler := NewHandler(logger.Development(), service, newMockAdminChecker())
+
+	ctx := context.Background()
+	testUser := &token.UserContext{
+		Username: "test-user",
+		Groups:   []string{"system:authenticated"},
+	}
+
+	// Create a key that expired yesterday
+	pastExpiry := time.Now().Add(-24 * time.Hour)
+	err := store.AddKey(ctx, testUser.Username, "expired-key", "expired-hash", "Expired Key", "", []string{"system:authenticated"}, testSubscriptionName, &pastExpiry, false)
+	require.NoError(t, err)
+
+	// Create an active key with future expiration
+	futureExpiry := time.Now().Add(24 * time.Hour)
+	err = store.AddKey(ctx, testUser.Username, "active-key", "active-hash", "Active Key", "", []string{"system:authenticated"}, testSubscriptionName, &futureExpiry, false)
+	require.NoError(t, err)
+
+	t.Run("GetExpiredKeyReturnsExpiredStatus", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/v1/api-keys/expired-key", nil)
+		c.Set("user", testUser)
+		c.Params = gin.Params{{Key: "id", Value: "expired-key"}}
+
+		handler.GetAPIKey(c)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		var response ApiKey
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		require.NoError(t, err)
+		assert.Equal(t, "expired-key", response.ID)
+		assert.Equal(t, StatusExpired, response.Status, "key past expiration should return expired status")
+	})
+
+	t.Run("GetActiveKeyReturnsActiveStatus", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/v1/api-keys/active-key", nil)
+		c.Set("user", testUser)
+		c.Params = gin.Params{{Key: "id", Value: "active-key"}}
+
+		handler.GetAPIKey(c)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		var response ApiKey
+		err := json.Unmarshal(w.Body.Bytes(), &response)
+		require.NoError(t, err)
+		assert.Equal(t, "active-key", response.ID)
+		assert.Equal(t, StatusActive, response.Status, "key with future expiration should return active status")
 	})
 }

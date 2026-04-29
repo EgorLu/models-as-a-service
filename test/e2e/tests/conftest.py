@@ -97,12 +97,12 @@ def model_id(model_catalog: dict):
 @pytest.fixture(scope="session")
 def model_base_url(model_catalog: dict, model_id: str, gateway_url: str) -> str:
     items = (model_catalog.get("data") or model_catalog.get("models") or [])
-    first = items[0] if items else {}
-    url = (first or {}).get("url")
-    if not url:
-        # Build from gateway URL
-        url = f"{gateway_url}/llm/{model_id}"
-    return url.rstrip("/")
+    match = next((m for m in items if m.get("id") == model_id), None)
+    if match:
+        url = match.get("url")
+        if url:
+            return url.rstrip("/")
+    return f"{gateway_url}/llm/{model_id}".rstrip("/")
 
 @pytest.fixture(scope="session")
 def model_v1(model_base_url: str) -> str:
@@ -153,11 +153,12 @@ def api_key(api_keys_base_url: str, headers: dict) -> str:
     Note: The key inherits the authenticated user's groups, which should include
     system:authenticated to satisfy AuthPolicy requirements for model access.
     """
-    print("[api_key] Creating API key for inference tests...")
+    sim_sub = os.environ.get("E2E_SIMULATOR_SUBSCRIPTION", "simulator-subscription")
+    print("[api_key] Creating API key for inference tests (subscription bound at mint)...")
     r = requests.post(
         api_keys_base_url,
         headers=headers,
-        json={"name": "e2e-test-inference-key"},
+        json={"name": "e2e-test-inference-key", "subscription": sim_sub},
         timeout=30,
         verify=TLS_VERIFY,
     )

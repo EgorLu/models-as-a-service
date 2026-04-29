@@ -13,9 +13,8 @@
 !!! warning "Database Required"
     The maas-api **requires** a PostgreSQL database and will fail to start without it.
     You must create a Secret named `maas-db-config` with the `DB_CONNECTION_URL` key before deploying.
-
     For development, the `scripts/deploy.sh` script creates this automatically.
-    For production ODH/RHOAI deployments, see [Database Prerequisites](../docs/content/install/prerequisites.md#database-prerequisite).
+    For production ODH/RHOAI deployments, see [Database Setup](../docs/content/install/maas-setup.md#database-setup).
 
 ### Setup
 
@@ -64,7 +63,7 @@ make deploy-dev
 
 This will:
 
-- Deploy MaaS API component with Service Account Token provider in debug mode
+- Deploy MaaS API component in debug mode
 
 #### Patch Kuadrant deployment
 
@@ -148,73 +147,49 @@ kustomize build ${PROJECT_DIR}/docs/samples/models/simulator | kubectl apply --s
 
 #### Getting a token
 
-MaaS API supports two types of tokens:
-
-1.  **Ephemeral Tokens** - Stateless tokens that provide better security posture as they can be easily refreshed by the caller using OpenShift Identity. These tokens can live as long as API keys (up to the configured expiration), making them suitable for both temporary and long-term access scenarios.
-2.  **API Keys** - Named, long-lived tokens for applications (stored in SQLite database). Suitable for services or applications that need persistent access with metadata tracking.
-
-##### Ephemeral Tokens
-
-To get a short-lived ephemeral token:
-
-```shell
-HOST="$(kubectl get gateway -l app.kubernetes.io/instance=maas-default-gateway -n openshift-ingress -o jsonpath='{.items[0].status.addresses[0].value}')"
-
-TOKEN_RESPONSE=$(curl -sSk \
-  -H "Authorization: Bearer $(oc whoami -t)" \
-  -H "Content-Type: application/json" \
-  -X POST \
-  -d '{
-    "expiration": "4h"
-  }' \
-  "${HOST}/maas-api/v1/tokens")
-
-echo $TOKEN_RESPONSE | jq -r .
-
-echo $TOKEN_RESPONSE | jq -r .token | cut -d. -f2 | jq -Rr '@base64d | fromjson'
-
-TOKEN=$(echo $TOKEN_RESPONSE | jq -r .token)
-```
-
-> [!NOTE]
-> ServiceAccount-based tokens have been removed. All authentication now uses API keys (`sk-oai-*` format) with hash-based storage.
+MaaS API uses **API Keys** — named, long-lived tokens for applications (stored in PostgreSQL database). Suitable for services or applications that need persistent access with metadata tracking.
 
 ##### API Keys
 
-The API uses hash-based API keys with OpenAI-compatible format (`sk-oai-*`). These keys support both permanent and expiring modes.
+The API uses hash-based API keys with OpenAI-compatible format (`sk-oai-*`). Keys expire after a configurable duration (default: 90 days via `API_KEY_MAX_EXPIRATION_DAYS`).
 
 ```shell
 HOST="$(kubectl get gateway -l app.kubernetes.io/instance=maas-default-gateway -n openshift-ingress -o jsonpath='{.items[0].status.addresses[0].value}')"
 
-# Create a permanent API key (no expiration)
+# Create an API key (defaults to API_KEY_MAX_EXPIRATION_DAYS, typically 90 days)
 API_KEY_RESPONSE=$(curl -sSk \
   -H "Authorization: Bearer $(oc whoami -t)" \
   -H "Content-Type: application/json" \
   -X POST \
   -d '{
-    "name": "my-permanent-key",
-    "description": "Production API key for my application"
+    "name": "my-api-key",
+    "description": "Production API key for my application",
+    "subscription": "simulator-subscription"
   }' \
   "${HOST}/maas-api/v1/api-keys")
 
 echo $API_KEY_RESPONSE | jq -r .
 API_KEY=$(echo $API_KEY_RESPONSE | jq -r .key)
 
-# Create an expiring API key (90 days)
+# Create an API key with custom expiration (30 days)
 API_KEY_RESPONSE=$(curl -sSk \
   -H "Authorization: Bearer $(oc whoami -t)" \
   -H "Content-Type: application/json" \
   -X POST \
   -d '{
-    "name": "my-expiring-key",
-    "description": "90-day test key",
-    "expiresIn": "90d"
+    "name": "my-short-lived-key",
+    "description": "30-day test key",
+    "expiresIn": "30d",
+    "subscription": "simulator-subscription"
   }' \
   "${HOST}/maas-api/v1/api-keys")
 
 echo $API_KEY_RESPONSE | jq -r .
 API_KEY=$(echo $API_KEY_RESPONSE | jq -r .key)
 ```
+
+> [!NOTE]
+> Replace `simulator-subscription` with your `MaaSSubscription` metadata name. To rely on **auto-selection** instead, remove the `subscription` field; maas-api then picks the accessible subscription with the highest `spec.priority`.
 
 > [!IMPORTANT]
 > The plaintext API key is shown ONLY ONCE at creation time. Store it securely - it cannot be retrieved again.
@@ -222,13 +197,16 @@ API_KEY=$(echo $API_KEY_RESPONSE | jq -r .key)
 **Managing API Keys:**
 
 ```shell
-# List all your API keys
+# Search your API keys
 curl -sSk \
   -H "Authorization: Bearer $(oc whoami -t)" \
-  "${HOST}/maas-api/v1/api-keys" | jq .
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{}' \
+  "${HOST}/maas-api/v1/api-keys/search" | jq .
 
 # Get specific API key by ID
-API_KEY_ID="<id-from-list>"
+API_KEY_ID="<id-from-search>"
 curl -sSk \
   -H "Authorization: Bearer $(oc whoami -t)" \
   "${HOST}/maas-api/v1/api-keys/${API_KEY_ID}" | jq .
@@ -243,6 +221,103 @@ curl -sSk \
 > [!NOTE]
 > API keys use hash-based storage (only SHA-256 hash stored, never plaintext). They are OpenAI-compatible (sk-oai-* format) and support optional expiration. API keys are stored in the configured database (see [Storage Configuration](#storage-configuration)) with metadata including creation date, expiration date, and status.
 
+##### Ephemeral API Keys
+
+Ephemeral keys are short-lived programmatic keys designed for temporary access scenarios. They differ from regular API keys in several ways:
+
+| Feature | Regular API Keys | Ephemeral API Keys |
+|---------|------------------|-------------------|
+| Default expiration | 90 days | 1 hour |
+| Maximum expiration | 90 days (configurable) | 1 hour (enforced) |
+| Name | Required | Optional (auto-generated if not provided) |
+| Shown in list/search | Yes | No (excluded by default) |
+| Use case | Long-term application access | Short-term programmatic access |
+
+```shell
+# Create an ephemeral key (1-hour default expiration, name auto-generated)
+API_KEY_RESPONSE=$(curl -sSk \
+  -H "Authorization: Bearer $(oc whoami -t)" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"ephemeral": true}' \
+  "${HOST}/maas-api/v1/api-keys")
+
+echo $API_KEY_RESPONSE | jq -r .
+API_KEY=$(echo $API_KEY_RESPONSE | jq -r .key)
+
+# Create an ephemeral key with custom name and expiration (max 1hr)
+API_KEY_RESPONSE=$(curl -sSk \
+  -H "Authorization: Bearer $(oc whoami -t)" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{
+    "ephemeral": true,
+    "name": "playground-session",
+    "expiresIn": "30m"
+  }' \
+  "${HOST}/maas-api/v1/api-keys")
+```
+
+To include ephemeral keys in search results, use the `includeEphemeral` filter:
+
+```shell
+# Search including ephemeral keys
+curl -sSk \
+  -H "Authorization: Bearer $(oc whoami -t)" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"filters": {"includeEphemeral": true}}' \
+  "${HOST}/maas-api/v1/api-keys/search" | jq .
+```
+
+## Configuration
+
+The maas-api server is configured via **environment variables** or **CLI flags** (CLI flags take precedence). 
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEBUG_MODE` | `false` | Enable debug logging. Set to `true` or `1`. |
+| `NAMESPACE` | `maas-api` | Namespace where maas-api is deployed. |
+| `GATEWAY_NAME` | `maas-default-gateway` | Name of the Gateway resource used for model routing. |
+| `GATEWAY_NAMESPACE` | `openshift-ingress` | Namespace of the Gateway resource. |
+| `MAAS_SUBSCRIPTION_NAMESPACE` | `models-as-a-service` | Namespace where MaaSSubscription CRs are located. |
+| `INSTANCE_NAME` | Value of `GATEWAY_NAME` | Name of the MaaS instance (for logging/identification). |
+| `SECURE` | `false` | Enable HTTPS. Requires TLS configuration. |
+| `ADDRESS` | `:8443` (HTTPS) or `:8080` (HTTP) | Server listen address (host:port). |
+| `PORT` | - | **DEPRECATED.** Use `ADDRESS` with `SECURE=false` instead. |
+| `API_KEY_MAX_EXPIRATION_DAYS` | `90` | Maximum allowed API key lifetime in days. Users cannot create keys with longer expiration. Minimum: 1. |
+| `ACCESS_CHECK_TIMEOUT_SECONDS` | `15` | Timeout for model access validation during `/v1/models` requests. Models that don't respond within this window are excluded. Minimum: 1. |
+| `TLS_CERT` | - | Path to TLS certificate file (PEM format). Required if `SECURE=true` and not using self-signed cert. |
+| `TLS_KEY` | - | Path to TLS private key file (PEM format). Required if `SECURE=true` and not using self-signed cert. |
+| `TLS_SELF_SIGNED` | `false` | Generate self-signed certificate. Alternative to providing `TLS_CERT`/`TLS_KEY`. |
+| `TLS_MIN_VERSION` | `1.2` | Minimum TLS version for HTTPS connections. Valid values: `1.2` or `1.3`. |
+
+!!! note "Database Configuration"
+    The database connection URL is loaded from the Kubernetes secret `maas-db-config` (key: `DB_CONNECTION_URL`) in the same namespace as the maas-api pod. See [Database Configuration](#database-configuration) below.
+
+### CLI Flags
+
+Most environment variables have corresponding CLI flags. When both are provided, CLI flags take precedence. Note that `API_KEY_MAX_EXPIRATION_DAYS` and `ACCESS_CHECK_TIMEOUT_SECONDS` are environment variable only and have no CLI flag equivalents.
+
+| Flag | Env Var | Default | Description |
+|------|---------|---------|-------------|
+| `--debug` | `DEBUG_MODE` | `false` | Enable debug mode. |
+| `--namespace` | `NAMESPACE` | `maas-api` | Namespace of the MaaS instance. |
+| `--name` | `INSTANCE_NAME` | Value of `--gateway-name` | Name of the MaaS instance. |
+| `--gateway-name` | `GATEWAY_NAME` | `maas-default-gateway` | Name of the Gateway resource. |
+| `--gateway-namespace` | `GATEWAY_NAMESPACE` | `openshift-ingress` | Namespace where Gateway is deployed. |
+| `--maas-subscription-namespace` | `MAAS_SUBSCRIPTION_NAMESPACE` | `models-as-a-service` | Namespace where MaaSSubscription CRs are located. |
+| `--secure` | `SECURE` | `false` | Use HTTPS. Requires TLS configuration. |
+| `--address` | `ADDRESS` | `:8443` or `:8080` | HTTPS listen address. |
+| `--port` | `PORT` | - | **DEPRECATED.** Use `--address` with `--secure=false`. |
+| `--tls-cert` | `TLS_CERT` | - | Path to TLS certificate. |
+| `--tls-key` | `TLS_KEY` | - | Path to TLS private key. |
+| `--tls-self-signed` | `TLS_SELF_SIGNED` | `false` | Generate self-signed certificate. |
+| `--tls-min-version` | `TLS_MIN_VERSION` | `1.2` | Minimum TLS version (`1.2` or `1.3`). |
+
+
 ### Database Configuration
 
 maas-api uses PostgreSQL for persistent storage of API key metadata. The database connection is configured via a Kubernetes Secret.
@@ -250,18 +325,62 @@ maas-api uses PostgreSQL for persistent storage of API key metadata. The databas
 !!! note "Automatic Setup"
     When using `scripts/deploy.sh` for development, PostgreSQL is deployed automatically with the secret created.
 
-For production deployments, see the [Database Prerequisites](../docs/content/install/prerequisites.md#database-prerequisite) guide.
+For production deployments, see the [Database Setup](../docs/content/install/maas-setup.md#database-setup) guide.
+
+#### Listing models with subscription filtering
+
+The `/v1/models` endpoint supports subscription filtering and aggregation. Use an **OpenShift token** or an **API key** in `Authorization: Bearer`. With a **user token**, optional `X-MaaS-Subscription` filters to one subscription when you have access to several. With an **API key**, the subscription is fixed at key mint time—no client `X-MaaS-Subscription` is needed for listing.
+
+    HOST="$(kubectl get gateway -l app.kubernetes.io/instance=maas-default-gateway -n openshift-ingress -o jsonpath='{.items[0].status.addresses[0].value}')"
+
+    # List models from all accessible subscriptions
+    curl ${HOST}/v1/models \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $TOKEN" | jq .
+
+    # List models from a specific subscription
+    curl ${HOST}/v1/models \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "X-MaaS-Subscription: my-subscription" | jq .
+
+    # List models from the subscription bound to an API key
+    curl ${HOST}/v1/models \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $API_KEY" | jq .
+
+**Subscription Aggregation**: When the same model (same ID and URL) is accessible via multiple subscriptions, it appears once in the response with an array of all subscriptions providing access:
+
+    {
+      "object": "list",
+      "data": [
+        {
+          "id": "model-name",
+          "url": "https://...",
+          "subscriptions": [
+            {"name": "subscription-a", "displayName": "Subscription A"},
+            {"name": "subscription-b", "displayName": "Subscription B"}
+          ]
+        }
+      ]
+    }
 
 #### Calling the model and hitting the rate limit
 
-Using model discovery:
+Inference requires an API key (mint with `POST /v1/api-keys` using your OpenShift token). Send **only** `Authorization: Bearer <api-key>`; subscription is taken from the key at mint time.
+
+Using model discovery (maas-api URL matches the [validation guide](../docs/content/install/validation.md); model `url` values come from the list response):
 
 ```shell
-HOST="$(kubectl get gateway -l app.kubernetes.io/instance=maas-default-gateway -n openshift-ingress -o jsonpath='{.items[0].status.addresses[0].value}')"
+CLUSTER_DOMAIN=$(kubectl get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')
+MAAS_API="https://maas.${CLUSTER_DOMAIN}/maas-api"
+API_KEY=$(curl -sSk -H "Authorization: Bearer $(oc whoami -t)" -H "Content-Type: application/json" \
+  -X POST -d '{"name":"rate-limit-demo","subscription":"simulator-subscription"}' \
+  "${MAAS_API}/v1/api-keys" | jq -r .key)
 
-MODELS=$(curl ${HOST}/v1/models  \
+MODELS=$(curl -sSk "${MAAS_API}/v1/models"  \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $TOKEN" | jq . -r)
+    -H "Authorization: Bearer ${API_KEY}" | jq . -r)
 
 echo $MODELS | jq .
 MODEL_URL=$(echo $MODELS | jq -r '.data[0].url')
@@ -270,7 +389,7 @@ MODEL_NAME=$(echo $MODELS | jq -r '.data[0].id')
 for i in {1..16}
 do
 curl -sSk -o /dev/null -w "%{http_code}\n" \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer ${API_KEY}" \
   -d "{
         \"model\": \"${MODEL_NAME}\",
         \"prompt\": \"Not really understood prompt\",

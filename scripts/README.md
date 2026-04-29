@@ -29,12 +29,16 @@ Automated deployment script for OpenShift clusters supporting both operator-base
 - Installs primary operator (RHOAI or ODH) or deploys via kustomize
 - Applies custom resources (DSC, DSCI)
 - Configures TLS backend (enabled by default, use `--disable-tls-backend` to skip)
+- Deploys `maas-controller`, which then deploys `maas-api` via the **Tenant reconciler** (SSA)
+- Passes `MAAS_API_IMAGE` to the controller as `RELATED_IMAGE_ODH_MAAS_API_IMAGE` so the Tenant reconciler uses the correct image
 - Supports custom operator catalogs and MaaS API images for PR testing
 
 **Options:**
 - `--operator-type <odh|rhoai>` - Which operator to install (default: odh)
 - `--deployment-mode <operator|kustomize>` - Deployment method (default: operator)
 - `--namespace <namespace>` - Target namespace for deployment
+- `--external-oidc` - Enable external OIDC on the `maas-api` AuthPolicy (kustomize mode only; in operator mode, configure `spec.externalOIDC` on the `Tenant` CR)
+- `--enable-keycloak` - Deploy a Keycloak instance for external OIDC testing
 - `--enable-tls-backend` - Enable TLS backend (default)
 - `--disable-tls-backend` - Disable TLS backend
 - `--verbose` - Enable debug logging
@@ -44,14 +48,15 @@ Automated deployment script for OpenShift clusters supporting both operator-base
 - `--channel <channel>` - Operator channel override (default: fast-3 for ODH, fast-3.x for RHOAI)
 
 **Requirements:**
-- OpenShift cluster (4.16+)
+- OpenShift cluster (4.19.9+)
 - `oc` CLI installed and logged in
 - `kubectl` installed
 - `jq` installed
 - `kustomize` installed
 
 **Environment Variables:**
-- `MAAS_API_IMAGE` - Custom MaaS API container image (works in both operator and kustomize modes)
+- `MAAS_API_IMAGE` - Custom MaaS API container image (passed to the Tenant reconciler via `RELATED_IMAGE_ODH_MAAS_API_IMAGE` on the controller Deployment)
+- `MAAS_CONTROLLER_IMAGE` - Custom MaaS controller container image
 - `OPERATOR_CATALOG` - Custom operator catalog for PR testing
 - `OPERATOR_IMAGE` - Custom operator image for PR testing
 - `OPERATOR_TYPE` - Operator type (odh/rhoai)
@@ -146,6 +151,51 @@ Results:
 
 ---
 
+### External OIDC
+
+External OIDC can be enabled in two ways:
+
+**Operator mode:** Edit the `Tenant` CR to add `spec.externalOIDC` with
+`issuerUrl` and `clientId`. The Tenant reconciler patches the AuthPolicy automatically.
+
+**Kustomize mode:** Use `--external-oidc` with env vars:
+```bash
+OIDC_ISSUER_URL=https://idp.example.com/realms/my-realm \
+OIDC_CLIENT_ID=my-client \
+./scripts/deploy.sh --deployment-mode kustomize --external-oidc
+```
+
+For a development Keycloak instance, use `--enable-keycloak` or run
+`./scripts/setup-keycloak.sh` directly. See
+[Keycloak setup](../docs/samples/install/keycloak/README.md) for realm
+configuration and test users.
+
+**E2E testing** with `EXTERNAL_OIDC=true` requires these environment variables:
+
+- `OIDC_ISSUER_URL`
+- `OIDC_TOKEN_URL`
+- `OIDC_CLIENT_ID`
+- `OIDC_USERNAME`
+- `OIDC_PASSWORD`
+
+---
+
+### `setup-authorino-tls.sh`
+Configures Authorino for TLS communication with maas-api. Run automatically by `deploy.sh` when `--enable-tls-backend` is set (default).
+
+**Usage:**
+```bash
+# Configure Authorino TLS (default: kuadrant-system)
+./scripts/setup-authorino-tls.sh
+
+# For RHCL, use rh-connectivity-link namespace
+AUTHORINO_NAMESPACE=rh-connectivity-link ./scripts/setup-authorino-tls.sh
+```
+
+**Note:** This script patches Authorino's service, CR, and deployment. Use `--disable-tls-backend` with `deploy.sh` to skip if you manage Authorino TLS separately.
+
+---
+
 ### `install-dependencies.sh`
 Installs individual dependencies (Kuadrant, ODH, etc.).
 
@@ -159,9 +209,13 @@ Installs individual dependencies (Kuadrant, ODH, etc.).
 ```
 
 **Options:**
+- `--all`: Install all components
 - `--kuadrant`: Install Kuadrant operator and dependencies
-- `--istio`: Install Istio
-- `--prometheus`: Install Prometheus
+- `--istio`: Install Istio service mesh
+- `--odh`: Install OpenDataHub operator (OpenShift only)
+- `--kserve`: Install KServe model serving platform
+- `--prometheus`: Install Prometheus operator
+- `--ocp`: Use OpenShift-specific handling
 
 ---
 
@@ -169,7 +223,7 @@ Installs individual dependencies (Kuadrant, ODH, etc.).
 
 ### Initial Deployment (Operator Mode - Recommended)
 ```bash
-# 1. Deploy the platform using ODH operator (default)
+# 1. Deploy the platform (installs prerequisites + maas-controller; Tenant reconciler deploys maas-api)
 ./scripts/deploy.sh
 
 # 2. Validate the deployment
@@ -184,7 +238,7 @@ kustomize build docs/samples/models/simulator | kubectl apply -f -
 
 ### Initial Deployment (Kustomize Mode)
 ```bash
-# 1. Deploy the platform using kustomize
+# 1. Deploy the platform via kustomize (maas-controller Tenant reconciler deploys maas-api)
 ./scripts/deploy.sh --deployment-mode kustomize
 
 # 2. Validate the deployment

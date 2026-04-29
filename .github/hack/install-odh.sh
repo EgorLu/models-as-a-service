@@ -5,10 +5,15 @@
 # Prerequisites: cert-manager and LWS operators (run install-cert-manager-and-lws.sh first).
 #
 # Environment variables:
-#   OPERATOR_CATALOG - Custom catalog image (optional). When unset, uses community-operators (ODH 3.3).
+#   OPERATOR_CATALOG - Custom catalog image (optional). When unset, uses community-operators.
 #                      Set to e.g. quay.io/opendatahub/opendatahub-operator-catalog:latest for custom builds.
-#   OPERATOR_CHANNEL - Subscription channel (default: fast-3 for community, fast for custom catalog)
+#   OPERATOR_CHANNEL   - Subscription channel (default: fast-3)
+#   OPERATOR_STARTING_CSV - Pin Subscription startingCSV (default: opendatahub-operator.v3.4.0-ea.1). Set to "-" to omit.
+#   OPERATOR_INSTALL_PLAN_APPROVAL - Manual (default) or Automatic; use "-" to omit.
+#     Manual: blocks auto-upgrades; this script auto-approves only the first InstallPlan so install does not stall.
 #   OPERATOR_IMAGE   - Custom operator image to patch into CSV (optional)
+#   OPERATOR_OPERANDS_MAP - Path to operands-map.yaml for RELATED_IMAGE env var injection (optional)
+#                           Used with OPERATOR_IMAGE to ensure component images match the operator.
 #
 # Usage: ./install-odh.sh
 
@@ -21,6 +26,8 @@ DATA_DIR="${REPO_ROOT}/scripts/data"
 NAMESPACE="${OPERATOR_NAMESPACE:-opendatahub}"
 OPERATOR_CATALOG="${OPERATOR_CATALOG:-}"
 OPERATOR_CHANNEL="${OPERATOR_CHANNEL:-}"
+OPERATOR_STARTING_CSV="${OPERATOR_STARTING_CSV:-}"
+OPERATOR_INSTALL_PLAN_APPROVAL="${OPERATOR_INSTALL_PLAN_APPROVAL:-}"
 OPERATOR_IMAGE="${OPERATOR_IMAGE:-}"
 
 # Source deployment helpers
@@ -54,33 +61,91 @@ patch_operator_csv_if_needed() {
     {\"op\": \"replace\", \"path\": \"/spec/install/spec/deployments/0/spec/template/spec/containers/0/image\", \"value\": \"$OPERATOR_IMAGE\"}
   ]"
   log_info "CSV $csv_name patched with image $OPERATOR_IMAGE"
+
+  # When using a custom operator image, the community CSV may lack RELATED_IMAGE env vars
+  # that the operator needs to deploy the correct component versions.
+  # If OPERATOR_OPERANDS_MAP points to a local operands-map.yaml, inject its env vars into the CSV.
+  if [[ -n "${OPERATOR_OPERANDS_MAP:-}" && -f "$OPERATOR_OPERANDS_MAP" ]]; then
+    log_info "Injecting RELATED_IMAGE env vars from $OPERATOR_OPERANDS_MAP into CSV"
+    local env_patches="["
+    local first=true
+    while IFS= read -r line; do
+      local name value
+      name=$(echo "$line" | sed -n 's/.*name: \(RELATED_IMAGE_[^ ]*\)/\1/p')
+      if [[ -n "$name" ]]; then
+        read -r value_line
+        value=$(echo "$value_line" | sed -n 's/.*value: \(.*\)/\1/p')
+        if [[ -n "$value" ]]; then
+          $first || env_patches+=","
+          first=false
+          env_patches+="{\"name\":\"$name\",\"value\":\"$value\"}"
+        fi
+      fi
+    done < "$OPERATOR_OPERANDS_MAP"
+
+    if [[ "$env_patches" != "[" ]]; then
+      env_patches+="]"
+      local container_path="/spec/install/spec/deployments/0/spec/template/spec/containers/0"
+      local existing_env
+      existing_env=$(kubectl get csv "$csv_name" -n "$namespace" -o jsonpath="{${container_path}.env}" 2>/dev/null || echo "[]")
+
+      local merged_env
+      merged_env=$(python3 -c "
+import json, sys
+existing = json.loads('${existing_env}')
+new_envs = json.loads(sys.stdin.read())
+existing_names = {e['name'] for e in existing}
+for e in new_envs:
+    if e['name'] not in existing_names:
+        existing.append(e)
+print(json.dumps(existing))
+" <<< "$env_patches")
+
+      kubectl patch csv "$csv_name" -n "$namespace" --type='json' \
+        -p="[{\"op\": \"replace\", \"path\": \"${container_path}/env\", \"value\": ${merged_env}}]"
+      log_info "CSV env vars patched with RELATED_IMAGE entries"
+    fi
+  fi
 }
 
 echo "=== Installing OpenDataHub operator ==="
 echo ""
 
-# 1. Catalog setup: use community-operators (ODH 3.3) by default, or custom catalog when OPERATOR_CATALOG is set
+# 1. Catalog setup: community-operators by default, or custom catalog when OPERATOR_CATALOG is set
 echo "1. Setting up ODH catalog..."
 if [[ -n "$OPERATOR_CATALOG" ]]; then
   echo "   Using custom catalog: $OPERATOR_CATALOG"
   create_custom_catalogsource "odh-custom-catalog" "openshift-marketplace" "$OPERATOR_CATALOG"
   catalog_source="odh-custom-catalog"
-  channel="${OPERATOR_CHANNEL:-fast}"
+  channel="${OPERATOR_CHANNEL:-fast-3}"
 else
-  echo "   Using community-operators (ODH 3.3)"
+  echo "   Using community-operators"
   catalog_source="community-operators"
   channel="${OPERATOR_CHANNEL:-fast-3}"
 fi
 
+# Pin to ODH 3.4 EA1 unless overridden (omit with OPERATOR_STARTING_CSV=- to follow channel head)
+starting_csv="${OPERATOR_STARTING_CSV:-opendatahub-operator.v3.4.0-ea.1}"
+[[ "$starting_csv" == "-" ]] && starting_csv=""
+
+# Manual = no auto-upgrades; install_olm_operator still approves the first InstallPlan programmatically
+plan_approval="${OPERATOR_INSTALL_PLAN_APPROVAL:-Manual}"
+[[ "$plan_approval" == "-" ]] && plan_approval=""
+
 # 2. Install ODH operator via OLM
 echo "2. Installing ODH operator..."
-install_olm_operator \
+if ! install_olm_operator \
   "opendatahub-operator" \
   "$NAMESPACE" \
   "$catalog_source" \
   "$channel" \
-  "" \
-  "AllNamespaces"
+  "$starting_csv" \
+  "AllNamespaces" \
+  "openshift-marketplace" \
+  "$plan_approval"; then
+  log_error "ODH operator installation failed"
+  exit 1
+fi
 
 # 3. Patch CSV with custom image if specified
 if [[ -n "$OPERATOR_IMAGE" ]]; then
@@ -143,7 +208,9 @@ EOF
   fi
 fi
 
-# 7. Apply DataScienceCluster (modelsAsService Unmanaged - MaaS deployed separately)
+# 7. Apply DataScienceCluster (KServe + ModelsAsService Managed)
+# The manifest filename retains "unmanaged" for backward compat; contents include
+# modelsAsService.managementState: Managed so the operator deploys maas-controller.
 echo "7. Applying DataScienceCluster..."
 if kubectl get datasciencecluster -A --no-headers 2>/dev/null | grep -q .; then
   echo "   DataScienceCluster already exists, skipping"

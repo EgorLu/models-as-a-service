@@ -18,11 +18,11 @@ package maas
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/go-logr/logr"
 	kservev1alpha1 "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
-	maasv1alpha1 "github.com/opendatahub-io/models-as-a-service/maas-controller/api/maas/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,8 +35,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	maasv1alpha1 "github.com/opendatahub-io/models-as-a-service/maas-controller/api/maas/v1alpha1"
 )
 
 // fakeHandler is a test-only BackendHandler that returns preconfigured values.
@@ -293,7 +296,7 @@ func TestMaaSModelReconciler_LLMISvcReadyTransition_ModelBecomesReady(t *testing
 		t.Fatal("mapLLMISvcToMaaSModels returned no requests; the MaaSModelRef referencing this LLMInferenceService should have been enqueued")
 	}
 	for _, watchReq := range requests {
-		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: watchReq.NamespacedName}); err != nil {
+		if _, err := r.Reconcile(ctx, watchReq); err != nil {
 			t.Fatalf("Reconcile (triggered by LLMInferenceService watch): %v", err)
 		}
 	}
@@ -355,7 +358,7 @@ func TestMaaSModelReconciler_LLMISvcReadyToNotReady_ModelBecomesPending(t *testi
 		t.Fatal("mapLLMISvcToMaaSModels returned no requests; the MaaSModelRef referencing this LLMInferenceService should have been enqueued")
 	}
 	for _, watchReq := range requests {
-		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: watchReq.NamespacedName}); err != nil {
+		if _, err := r.Reconcile(ctx, watchReq); err != nil {
 			t.Fatalf("Reconcile (triggered by LLMInferenceService watch): %v", err)
 		}
 	}
@@ -510,6 +513,63 @@ func TestLlmisvcReadyChangedPredicate(t *testing.T) {
 	})
 }
 
+// TestMaaSModelRefReconciler_HTTPRouteRaceCondition verifies that MaaSModelRef reliably
+// reaches Ready state when HTTPRoute is created after the MaaSModelRef (common during startup).
+func TestMaaSModelRefReconciler_HTTPRouteRaceCondition(t *testing.T) {
+	ctx := context.Background()
+	const (
+		modelName   = "test-model"
+		llmisvcName = "test-llmisvc"
+		ns          = "default"
+	)
+
+	// Start with MaaSModelRef and ready LLMInferenceService, but NO HTTPRoute
+	llmisvc := newLLMISvc(llmisvcName, ns, corev1.ConditionTrue)
+	model := newMaaSModelRef(modelName, ns, "LLMInferenceService", llmisvcName)
+	r, c := newTestReconciler(model, llmisvc)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: modelName, Namespace: ns}}
+
+	// --- Phase 1: Reconcile without HTTPRoute -> should enter Pending ---
+
+	result, err := r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("Reconcile (no HTTPRoute): %v", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue when HTTPRoute not found (watch handles it), got: %v", result)
+	}
+
+	got := &maasv1alpha1.MaaSModelRef{}
+	if err := c.Get(ctx, req.NamespacedName, got); err != nil {
+		t.Fatalf("Get after first reconcile: %v", err)
+	}
+	if got.Status.Phase != "Pending" {
+		t.Errorf("Phase after first reconcile = %q, want Pending (HTTPRoute doesn't exist yet)", got.Status.Phase)
+	}
+	assertReadyCondition(t, got.Status.Conditions, metav1.ConditionFalse, "BackendNotReady")
+
+	// --- Phase 2: KServe creates HTTPRoute -> model should become Ready on re-reconcile ---
+
+	route := newLLMISvcRoute(llmisvcName, ns)
+	if err := c.Create(ctx, route); err != nil {
+		t.Fatalf("Create HTTPRoute: %v", err)
+	}
+
+	// Reconcile again (triggered by HTTPRoute watch)
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("Reconcile (with HTTPRoute): %v", err)
+	}
+
+	final := &maasv1alpha1.MaaSModelRef{}
+	if err := c.Get(ctx, req.NamespacedName, final); err != nil {
+		t.Fatalf("Get after HTTPRoute created: %v", err)
+	}
+	if final.Status.Phase != "Ready" {
+		t.Errorf("Phase after HTTPRoute created = %q, want Ready", final.Status.Phase)
+	}
+	assertReadyCondition(t, final.Status.Conditions, metav1.ConditionTrue, "Reconciled")
+}
+
 // TestMaaSModelRefReconciler_DuplicateReconciliation verifies that reconciling the same
 // MaaSModelRef twice does not produce a redundant status update when nothing has changed.
 func TestMaaSModelRefReconciler_DuplicateReconciliation(t *testing.T) {
@@ -659,5 +719,111 @@ func TestMaaSModelReconciler_DeleteGeneratedPolicies_ManagedAnnotation(t *testin
 				})
 			}
 		})
+	}
+}
+
+func TestMapHTTPRouteToMaaSModelRefs(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name         string
+		route        *gatewayapiv1.HTTPRoute
+		models       []*maasv1alpha1.MaaSModelRef
+		wantRequests int
+	}{
+		{
+			name:  "returns all models in same namespace",
+			route: newHTTPRoute("test-route", "default"),
+			models: []*maasv1alpha1.MaaSModelRef{
+				newMaaSModelRef("model1", "default", "LLMInferenceService", "llmisvc1"),
+				newMaaSModelRef("model2", "default", "ExternalModel", "ext1"),
+			},
+			wantRequests: 2,
+		},
+		{
+			name:  "ignores models in different namespace",
+			route: newHTTPRoute("test-route", "default"),
+			models: []*maasv1alpha1.MaaSModelRef{
+				newMaaSModelRef("model1", "default", "LLMInferenceService", "llmisvc1"),
+				newMaaSModelRef("model2", "other-ns", "LLMInferenceService", "llmisvc2"),
+			},
+			wantRequests: 1,
+		},
+		{
+			name:         "returns empty list when no models",
+			route:        newHTTPRoute("test-route", "default"),
+			models:       nil,
+			wantRequests: 0,
+		},
+		{
+			name: "returns empty list when obj is not HTTPRoute",
+			// Pass nil for route, but we'll create a different object type.
+			// This tests that mapHTTPRouteToMaaSModelRefs properly handles non-HTTPRoute
+			// objects via type assertion (returns early when obj.(*gatewayapiv1.HTTPRoute) fails).
+			// We intentionally pass a MaaSModelRef to trigger the type assertion failure.
+			route:        nil,
+			models:       []*maasv1alpha1.MaaSModelRef{newMaaSModelRef("model1", "default", "LLMInferenceService", "llmisvc1")},
+			wantRequests: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []client.Object
+			for _, m := range tt.models {
+				objects = append(objects, m)
+			}
+
+			r, _ := newTestReconciler(objects...)
+
+			// Use either the provided route or a non-HTTPRoute object
+			var obj client.Object
+			if tt.route != nil {
+				obj = tt.route
+			} else {
+				obj = &maasv1alpha1.MaaSModelRef{
+					ObjectMeta: metav1.ObjectMeta{Name: "not-a-route", Namespace: "default"},
+				}
+			}
+
+			requests := r.mapHTTPRouteToMaaSModelRefs(ctx, obj)
+
+			if len(requests) != tt.wantRequests {
+				t.Errorf("mapHTTPRouteToMaaSModelRefs() returned %d requests, want %d", len(requests), tt.wantRequests)
+			}
+
+			// Verify that returned requests match the models in the same namespace
+			if tt.route != nil && len(requests) > 0 {
+				expectedNS := tt.route.Namespace
+				for _, req := range requests {
+					if req.Namespace != expectedNS {
+						t.Errorf("request namespace = %q, want %q", req.Namespace, expectedNS)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestMapHTTPRouteToMaaSModelRefs_ListError(t *testing.T) {
+	ctx := context.Background()
+	route := newHTTPRoute("test-route", "default")
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*maasv1alpha1.MaaSModelRefList); ok {
+					return errors.New("simulated API server error")
+				}
+				return cl.List(ctx, list, opts...)
+			},
+		}).
+		Build()
+
+	r := &MaaSModelRefReconciler{Client: c, Scheme: scheme}
+	requests := r.mapHTTPRouteToMaaSModelRefs(ctx, route)
+	if len(requests) != 0 {
+		t.Errorf("mapHTTPRouteToMaaSModelRefs() with List error returned %d requests, want 0", len(requests))
 	}
 }

@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Bash strict mode (without -e to continue validation even if some checks fail)
+# -u: treat unset variables as an error
+# -o pipefail: return value of a pipeline is the value of the last command to exit with a non-zero status
+set -uo pipefail
+
 # Source helper functions for JWT decoding
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/deployment-helpers.sh"
@@ -10,7 +15,8 @@ source "$SCRIPT_DIR/deployment-helpers.sh"
 # Usage: ./validate-deployment.sh [MODEL_NAME]
 #   MODEL_NAME: Optional. If provided, the script will validate using this specific model
 
-# Note: We don't use 'set -e' because we want to continue validation even if some checks fail
+# Note: We use 'set -uo pipefail' but NOT 'set -e' because we want to continue
+# validation even if some checks fail, while still catching undefined variables and pipe failures
 
 # Parse command line arguments
 REQUESTED_MODEL=""
@@ -22,7 +28,7 @@ MAX_TOKENS=50  # Default max_tokens for requests
 MAAS_API_NAMESPACE="${MAAS_API_NAMESPACE:-opendatahub}"  # Default namespace for MaaS API (use --namespace to override)
 
 # Show help if requested
-if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     echo "MaaS Platform Deployment Validation Script"
     echo ""
     echo "Usage: $0 [OPTIONS] [MODEL_NAME]"
@@ -50,9 +56,13 @@ if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     echo "  -n, --namespace NS        Namespace where MaaS API is deployed"
     echo "                            Default: opendatahub (or MAAS_API_NAMESPACE env var)"
     echo ""
-    echo "Environment (for non-admin users):"
+    echo "Environment Variables:"
     echo "  MAAS_GATEWAY_HOST         Override gateway URL when cluster domain is not readable"
     echo "                            e.g. export MAAS_GATEWAY_HOST=https://maas.apps.your-cluster.example.com"
+    echo "  MAAS_API_NAMESPACE        Namespace where MaaS API is deployed (default: opendatahub)"
+    echo ""
+    echo "Note: This script uses connection timeouts from curl (10s connect, 30s max)"
+    echo "      For cluster-level timeouts, see deployment-helpers.sh timeout constants"
     echo ""
     echo "Examples:"
     echo "  # Basic validation"
@@ -194,13 +204,13 @@ print_success() {
 
 print_fail() {
     echo -e "${RED}❌ FAIL: $1${NC}"
-    if [ -n "$2" ]; then
+    if [ -n "${2:-}" ]; then
         echo -e "${RED}   Reason: $2${NC}"
     fi
-    if [ -n "$3" ]; then
+    if [ -n "${3:-}" ]; then
         echo -e "${YELLOW}   Suggestion: $3${NC}"
     fi
-    if [ -n "$4" ]; then
+    if [ -n "${4:-}" ]; then
         echo -e "${YELLOW}   Suggestion: $4${NC}"
     fi
     ((FAILED++))
@@ -208,10 +218,10 @@ print_fail() {
 
 print_warning() {
     echo -e "${YELLOW}⚠️  WARNING: $1${NC}"
-    if [ -n "$2" ]; then
+    if [ -n "${2:-}" ]; then
         echo -e "${YELLOW}   Note: $2${NC}"
     fi
-    if [ -n "$3" ]; then
+    if [ -n "${3:-}" ]; then
         echo -e "${YELLOW}   $3${NC}"
     fi
     ((WARNINGS++))
@@ -222,7 +232,11 @@ print_info() {
 }
 
 # Check if running on OpenShift
-if ! kubectl api-resources | grep -q "route.openshift.io"; then
+# First check if kubectl is working, then check for OpenShift-specific API resources
+api_resources=$(kubectl api-resources 2>/dev/null)
+if [ $? -ne 0 ]; then
+    print_warning "Could not query API resources (kubectl may be slow to respond)" "Continuing validation anyway..."
+elif ! echo "$api_resources" | grep -q "route.openshift.io"; then
     print_fail "Not running on OpenShift" "This validation script is designed for OpenShift clusters" "Use a different validation approach for vanilla Kubernetes"
     exit 1
 fi
@@ -380,7 +394,7 @@ print_header "3️⃣ Policy Status"
 print_check "AuthPolicy"
 AUTHPOLICY_COUNT=$(kubectl get authpolicy -A --no-headers 2>/dev/null | wc -l || echo "0")
 if [ "$AUTHPOLICY_COUNT" -gt 0 ]; then
-    AUTHPOLICY_STATUS=$(kubectl get authpolicy -n openshift-ingress gateway-auth-policy -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null || echo "NotFound")
+    AUTHPOLICY_STATUS=$(kubectl get authpolicy -n openshift-ingress gateway-default-auth -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null || echo "NotFound")
     if [ "$AUTHPOLICY_STATUS" = "True" ]; then
         print_success "AuthPolicy is configured and accepted"
     else
@@ -414,18 +428,79 @@ else
     print_info "Using gateway endpoint: $HOST"
     
     # Get authentication token for API tests
-    # Use pre-existing token from CI/test environment, or fall back to oc whoami -t
+    # First obtain the OC identity token, then create a MaaS API key for subsequent calls
     print_check "Authentication token"
-    if command -v oc &> /dev/null; then
-        TOKEN="${TOKEN:-${ADMIN_OC_TOKEN:-$(oc whoami -t 2>/dev/null || echo "")}}"
-        if [ -n "$TOKEN" ]; then
-            print_success "Authentication token available"
-        else
-            print_warning "Cannot get OpenShift token" "Not logged into oc CLI" "Run: oc login"
-        fi
+    TOKEN=""
+    API_KEY_ID=""
+    OC_TOKEN="${ADMIN_OC_TOKEN:-}"
+    if [ -z "$OC_TOKEN" ] && command -v oc &> /dev/null; then
+        OC_TOKEN="$(oc whoami -t 2>/dev/null || echo "")"
+    fi
+
+    if [ -n "$OC_TOKEN" ]; then
+        print_success "OpenShift identity token available"
+    elif command -v oc &> /dev/null; then
+        print_warning "Cannot get OpenShift token" "Not logged into oc CLI" "Run: oc login"
     else
-        print_warning "oc CLI not found" "Cannot test authentication" "Install oc CLI or use kubectl with token"
-        TOKEN=""
+        print_warning "Cannot get OpenShift token" "Neither ADMIN_OC_TOKEN nor oc CLI is available" "Set ADMIN_OC_TOKEN or install oc CLI"
+    fi
+
+    # Create a MaaS API key using the OC token
+    if [ -n "$OC_TOKEN" ]; then
+        print_check "MaaS API key creation"
+        API_KEY_NAME="validate-test-$(date +%s)"
+        API_KEY_RESPONSE=$(curl -sSk --connect-timeout 10 --max-time 30 \
+            -H "Authorization: Bearer $OC_TOKEN" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            -d "{\"expiresIn\": \"1h\", \"name\": \"$API_KEY_NAME\"}" \
+            -w "\n%{http_code}" \
+            "${HOST}/maas-api/v1/api-keys" 2>/dev/null || echo "")
+        API_KEY_HTTP_CODE=$(echo "$API_KEY_RESPONSE" | tail -n1)
+        API_KEY_BODY=$(echo "$API_KEY_RESPONSE" | sed '$d')
+
+        if [ "$API_KEY_HTTP_CODE" = "201" ]; then
+            TOKEN=$(echo "$API_KEY_BODY" | jq -r '.key // empty' 2>/dev/null)
+            API_KEY_ID=$(echo "$API_KEY_BODY" | jq -r '.id // empty' 2>/dev/null)
+            if [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] && [ -n "$API_KEY_ID" ] && [ "$API_KEY_ID" != "null" ]; then
+                print_success "MaaS API key created (name: $API_KEY_NAME)"
+                # Set up cleanup trap to delete the API key on exit
+                cleanup_api_key() {
+                    if [ -n "${API_KEY_ID:-}" ] && [ "${API_KEY_ID}" != "null" ]; then
+                        curl -sSk -o /dev/null \
+                            -H "Authorization: Bearer $OC_TOKEN" \
+                            -X DELETE \
+                            "${HOST}/maas-api/v1/api-keys/${API_KEY_ID}" 2>/dev/null || true
+                    fi
+                }
+                cleanup_and_exit() {
+                    local status="$1"
+                    trap - EXIT
+                    cleanup_api_key
+                    exit "$status"
+                }
+                trap cleanup_api_key EXIT
+                trap 'cleanup_and_exit 130' INT
+                trap 'cleanup_and_exit 143' TERM
+            else
+                print_fail "Failed to parse API key from response" \
+                    "Response omitted because it may contain the plaintext API key"
+                # Clean up the API key if we got an ID but failed to parse the key
+                if [ -n "$API_KEY_ID" ]; then
+                    curl -sSk -o /dev/null \
+                        -H "Authorization: Bearer $OC_TOKEN" \
+                        -X DELETE \
+                        "${HOST}/maas-api/v1/api-keys/${API_KEY_ID}" 2>/dev/null || true
+                fi
+                TOKEN=""
+                API_KEY_ID=""
+            fi
+        else
+            print_fail "Failed to create MaaS API key (HTTP $API_KEY_HTTP_CODE)" \
+                "Response: $(echo "$API_KEY_BODY" | head -c 200)" \
+                "Check MaaS API key endpoint: ${HOST}/maas-api/v1/api-keys"
+            TOKEN=""
+        fi
     fi
     
     # Test models endpoint
@@ -571,7 +646,7 @@ else
         print_check "Rate limiting"
 
         # Log current user tier and attempt to fetch the configured rate limit from the cluster
-        if [ -n "$TIER" ]; then
+        if [ -n "${TIER:-}" ]; then
             print_info "Current user tier: $TIER"
             # Query the TokenRateLimitPolicy to show the configured limit for this tier
             TIER_LIMIT=$(kubectl get tokenratelimitpolicy -n openshift-ingress -o jsonpath="{.items[0].spec.limits.${TIER}-user-tokens.rates[0].limit}" 2>/dev/null || echo "")
@@ -617,7 +692,7 @@ else
         # Determine if the user tier has high rate limits (enterprise/premium users)
         # For high-tier users, all requests succeeding is expected and not a failure
         HIGH_TIER=false
-        if [ -n "$TIER" ]; then
+        if [ -n "${TIER:-}" ]; then
             case "$TIER" in
                 enterprise|premium)
                     HIGH_TIER=true

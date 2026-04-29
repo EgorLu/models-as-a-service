@@ -37,8 +37,17 @@ func NewPostgresStore(db *sql.DB, log *logger.Logger) *PostgresStore {
 
 // AddKey stores an API key with hash-only storage (no plaintext).
 // Keys can be permanent (expiresAt=nil) or expiring (expiresAt set).
+// ephemeral marks the key as short-lived for programmatic use.
+//
+// Note on naming: keyID parameter is the database UUID/JTI (primary key), distinct from
+// the embedded_key_id salt in the API key format. The keyHash is computed as
+// SHA-256(embedded_key_id + "\x00" + secret), where embedded_key_id is encoded in the
+// API key string (sk-oai-{embedded_key_id}_{secret}).
+//
 // Note: keyPrefix is NOT stored (security - reduces brute-force attack surface).
-func (s *PostgresStore) AddKey(ctx context.Context, username, keyID, keyHash, name, description string, userGroups []string, expiresAt *time.Time) error {
+func (s *PostgresStore) AddKey(
+	ctx context.Context, username, keyID, keyHash, name, description string, userGroups []string, subscription string, expiresAt *time.Time, ephemeral bool,
+) error {
 	if keyID == "" {
 		return ErrEmptyJTI
 	}
@@ -48,21 +57,27 @@ func (s *PostgresStore) AddKey(ctx context.Context, username, keyID, keyHash, na
 	if keyHash == "" {
 		return errors.New("key hash is required")
 	}
+	if subscription == "" {
+		return errors.New("subscription is required")
+	}
+	if ephemeral && expiresAt == nil {
+		return errors.New("ephemeral keys must have an expiration time")
+	}
 	if userGroups == nil {
 		userGroups = []string{}
 	}
 
 	query := `
-		INSERT INTO api_keys (id, username, name, description, key_hash, user_groups, status, created_at, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8)
+		INSERT INTO api_keys (id, username, name, description, key_hash, user_groups, subscription, status, created_at, expires_at, ephemeral)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8, $9, $10)
 	`
 	// Use pq.Array to handle PostgreSQL TEXT[] type
-	_, err := s.db.ExecContext(ctx, query, keyID, username, name, description, keyHash, pq.Array(userGroups), time.Now().UTC(), expiresAt)
+	_, err := s.db.ExecContext(ctx, query, keyID, username, name, description, keyHash, pq.Array(userGroups), subscription, time.Now().UTC(), expiresAt, ephemeral)
 	if err != nil {
 		return fmt.Errorf("failed to insert API key: %w", err)
 	}
 
-	s.logger.Debug("Stored API key", "id", keyID, "user", username)
+	s.logger.Debug("Stored API key", "id", keyID, "user", username, "ephemeral", ephemeral)
 	return nil
 }
 
@@ -71,6 +86,7 @@ func (s *PostgresStore) AddKey(ctx context.Context, username, keyID, keyHash, na
 // Fetches limit+1 items to efficiently determine if more pages exist.
 // username can be empty (admin viewing all users) or specific username.
 // statuses can filter by status (active, revoked, expired) - empty means all statuses.
+// Note: Ephemeral keys are excluded by default (use Search with IncludeEphemeral for full control).
 func (s *PostgresStore) List(ctx context.Context, username string, params PaginationParams, statuses []string) (*PaginatedResult, error) {
 	// Validate params
 	if params.Limit < 1 || params.Limit > 100 {
@@ -84,6 +100,9 @@ func (s *PostgresStore) List(ctx context.Context, username string, params Pagina
 	var whereClauses []string
 	var args []any
 	argPos := 1
+
+	// Exclude ephemeral keys by default
+	whereClauses = append(whereClauses, "ephemeral = FALSE")
 
 	if username != "" {
 		whereClauses = append(whereClauses, fmt.Sprintf("username = $%d", argPos))
@@ -111,7 +130,7 @@ func (s *PostgresStore) List(ctx context.Context, username string, params Pagina
 
 	//nolint:gosec // Dynamic WHERE clause is safe - uses parameterized queries
 	query := fmt.Sprintf(`
-		SELECT id, name, description, created_at, expires_at, status, last_used_at
+		SELECT id, name, description, subscription, created_at, expires_at, status, last_used_at, ephemeral
 		FROM api_keys
 		%s
 		ORDER BY created_at DESC
@@ -133,7 +152,7 @@ func (s *PostgresStore) List(ctx context.Context, username string, params Pagina
 		var expiresAt, lastUsedAt sql.NullTime
 		var description sql.NullString
 
-		if err := rows.Scan(&k.ID, &k.Name, &description, &createdAt, &expiresAt, &k.Status, &lastUsedAt); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &description, &k.Subscription, &createdAt, &expiresAt, &k.Status, &lastUsedAt, &k.Ephemeral); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
@@ -169,6 +188,7 @@ func (s *PostgresStore) List(ctx context.Context, username string, params Pagina
 }
 
 // Search implements flexible API key search with filtering, sorting, pagination.
+// Ephemeral keys are excluded by default unless IncludeEphemeral filter is set to true.
 func (s *PostgresStore) Search(
 	ctx context.Context,
 	username string,
@@ -189,6 +209,11 @@ func (s *PostgresStore) Search(
 	var args []any
 	argPos := 1
 
+	// Exclude ephemeral keys by default
+	if filters.IncludeEphemeral == nil || !*filters.IncludeEphemeral {
+		whereClauses = append(whereClauses, "ephemeral = FALSE")
+	}
+
 	// Filter by username
 	if username != "" {
 		whereClauses = append(whereClauses, fmt.Sprintf("username = $%d", argPos))
@@ -196,7 +221,9 @@ func (s *PostgresStore) Search(
 		argPos++
 	}
 
-	// Filter by status
+	// Filter by effective status (accounts for expired keys still stored as 'active')
+	// Use CASE expression to compute effective status at query time
+	effectiveStatusExpr := "CASE WHEN status = 'active' AND expires_at IS NOT NULL AND expires_at < NOW() THEN 'expired' ELSE status END"
 	if len(filters.Status) > 0 {
 		placeholders := make([]string, len(filters.Status))
 		for i, status := range filters.Status {
@@ -204,7 +231,7 @@ func (s *PostgresStore) Search(
 			args = append(args, strings.TrimSpace(status))
 			argPos++
 		}
-		whereClauses = append(whereClauses, fmt.Sprintf("status IN (%s)", strings.Join(placeholders, ",")))
+		whereClauses = append(whereClauses, fmt.Sprintf("(%s) IN (%s)", effectiveStatusExpr, strings.Join(placeholders, ",")))
 	}
 
 	// Build final WHERE clause
@@ -228,14 +255,17 @@ func (s *PostgresStore) Search(
 	// Fetch one extra to determine hasMore
 	fetchLimit := pagination.Limit + 1
 
+	// Use effective status in SELECT to match WHERE clause filtering
+	effectiveStatusSelect := "CASE WHEN status = 'active' AND expires_at IS NOT NULL AND expires_at < NOW() THEN 'expired' ELSE status END"
+
 	//nolint:gosec // Dynamic ORDER BY is safe - sort.By/Order validated against allowlist in handler
 	query := fmt.Sprintf(`
-		SELECT id, name, description, created_at, expires_at, status, last_used_at
+		SELECT id, name, description, subscription, username, created_at, expires_at, %s AS status, last_used_at, ephemeral
 		FROM api_keys
 		%s
 		%s
 		LIMIT $%d OFFSET $%d
-	`, whereClause, orderByClause, argPos, argPos+1)
+	`, effectiveStatusSelect, whereClause, orderByClause, argPos, argPos+1)
 
 	args = append(args, fetchLimit, pagination.Offset)
 
@@ -256,10 +286,13 @@ func (s *PostgresStore) Search(
 			&key.ID,
 			&key.Name,
 			&description,
+			&key.Subscription,
+			&key.Username,
 			&createdAt,
 			&expiresAt,
 			&key.Status,
 			&lastUsedAt,
+			&key.Ephemeral,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan API key: %w", err)
@@ -300,8 +333,11 @@ func (s *PostgresStore) Search(
 
 // Get retrieves a single API key by ID.
 func (s *PostgresStore) Get(ctx context.Context, keyID string) (*ApiKey, error) {
+	// Use effective status to return 'expired' for keys past expiration date
 	query := `
-		SELECT id, name, description, username, created_at, expires_at, status, last_used_at
+		SELECT id, name, description, username, subscription, created_at, expires_at,
+			CASE WHEN status = 'active' AND expires_at IS NOT NULL AND expires_at < NOW() THEN 'expired' ELSE status END AS status,
+			last_used_at, ephemeral
 		FROM api_keys
 		WHERE id = $1
 	`
@@ -312,7 +348,7 @@ func (s *PostgresStore) Get(ctx context.Context, keyID string) (*ApiKey, error) 
 	var expiresAt, lastUsedAt sql.NullTime
 	var description sql.NullString
 
-	if err := row.Scan(&k.ID, &k.Name, &description, &k.Username, &createdAt, &expiresAt, &k.Status, &lastUsedAt); err != nil {
+	if err := row.Scan(&k.ID, &k.Name, &description, &k.Username, &k.Subscription, &createdAt, &expiresAt, &k.Status, &lastUsedAt, &k.Ephemeral); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrKeyNotFound
 		}
@@ -336,7 +372,7 @@ func (s *PostgresStore) Get(ctx context.Context, keyID string) (*ApiKey, error) 
 // GetByHash looks up an API key by its SHA-256 hash (critical path for validation).
 func (s *PostgresStore) GetByHash(ctx context.Context, keyHash string) (*ApiKey, error) {
 	query := `
-		SELECT id, username, name, description, user_groups, status, expires_at, last_used_at
+		SELECT id, username, name, description, user_groups, subscription, status, expires_at, last_used_at, ephemeral
 		FROM api_keys
 		WHERE key_hash = $1
 	`
@@ -348,7 +384,7 @@ func (s *PostgresStore) GetByHash(ctx context.Context, keyHash string) (*ApiKey,
 	var userGroups []string
 
 	// Use pq.Array to scan PostgreSQL TEXT[] into []string
-	if err := row.Scan(&k.ID, &k.Username, &k.Name, &description, pq.Array(&userGroups), &k.Status, &expiresAt, &lastUsedAt); err != nil {
+	if err := row.Scan(&k.ID, &k.Username, &k.Name, &description, pq.Array(&userGroups), &k.Subscription, &k.Status, &expiresAt, &lastUsedAt, &k.Ephemeral); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrKeyNotFound
 		}
@@ -433,6 +469,29 @@ func (s *PostgresStore) UpdateLastUsed(ctx context.Context, keyID string) error 
 		return fmt.Errorf("failed to update last_used_at: %w", err)
 	}
 	return nil
+}
+
+// DeleteExpiredEphemeral removes expired ephemeral API keys that have been expired for at least 30 minutes.
+// The grace period provides a safety net before hard-deleting keys from the database.
+// Uses the partial index idx_api_keys_ephemeral_expired for efficient lookups.
+func (s *PostgresStore) DeleteExpiredEphemeral(ctx context.Context) (int64, error) {
+	query := `DELETE FROM api_keys WHERE ephemeral = TRUE AND expires_at IS NOT NULL AND expires_at < NOW() - INTERVAL '30 minutes'`
+
+	result, err := s.db.ExecContext(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete expired ephemeral keys: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get affected rows: %w", err)
+	}
+
+	if rows > 0 {
+		s.logger.Info("Deleted expired ephemeral keys", "count", rows)
+	}
+
+	return rows, nil
 }
 
 // Close closes the database connection.

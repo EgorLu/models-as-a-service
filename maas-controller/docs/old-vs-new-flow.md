@@ -98,7 +98,7 @@ Model Endpoint
 
 | Resource | Namespace | Created by | Purpose |
 |----------|-----------|------------|---------|
-| MaaSModelRef | opendatahub | User/admin | Registers a model with MaaS |
+| MaaSModelRef | Same as model (e.g. `llm`) | User/admin | Registers a model with MaaS |
 | MaaSAuthPolicy | models-as-a-service | User/admin | Defines who (groups) can access which models |
 | MaaSSubscription | models-as-a-service | User/admin | Defines per-model token rate limits for owner groups |
 | AuthPolicy (generated) | llm | maas-controller | Per-model auth, one per (MaaSAuthPolicy, model) pair |
@@ -154,3 +154,13 @@ To move from old flow to new flow on an existing cluster:
    - Create a `MaaSSubscription` CR with the token rate limits
 3. The old `gateway-token-rate-limits` and `tier-to-group-mapping` ConfigMap can be removed
 4. The MaaS API is still needed for token minting and model listing (unchanged)
+
+**For detailed step-by-step migration instructions, see [Migration Guide: Tier-Based to Subscription Model](../../docs/content/migration/tier-to-subscription.md)**.
+
+The migration guide includes:
+- Zero-downtime migration strategy
+- Automated migration script (`scripts/migrate-tier-to-subscription.sh`)
+- Conversion worksheet
+- Rollback procedures
+- Troubleshooting common issues
+- ODH Model Controller considerations

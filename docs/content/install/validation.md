@@ -2,13 +2,8 @@
 
 This guide provides instructions for validating and testing your MaaS Platform deployment.
 
-## Namespace Reference
-
-| Component | RHOAI | ODH |
-|-----------|-------|-----|
-| MaaS API | redhat-ods-applications | opendatahub |
-| Kuadrant/RHCL | kuadrant-system | kuadrant-system |
-| Gateway | openshift-ingress | openshift-ingress |
+!!! note "Prerequisite"
+    At least one model must be deployed to validate the installation. See [Model Setup (On Cluster)](model-setup.md) to deploy sample models.
 
 ## Manual Validation (Recommended)
 
@@ -29,30 +24,53 @@ echo "Gateway endpoint: $HOST"
     echo "Using fallback gateway endpoint: $HOST"
     ```
 
-### 2. Get Authentication Token
+!!! note "Optional"
+    List MaaSSubscriptions you can access (authenticate with your OpenShift token; requires `HOST` from above):
+    ```bash
+    curl -sSk -H "Authorization: Bearer $(oc whoami -t)" \
+      "${HOST}/maas-api/v1/subscriptions" | jq .
+    ```
 
-For OpenShift:
+### 2. Get API Key
+
+For OpenShift, create an API key (authenticate with your OpenShift token):
 
 ```bash
-TOKEN_RESPONSE=$(curl -sSk \
+API_KEY_RESPONSE=$(curl -sSk \
   -H "Authorization: Bearer $(oc whoami -t)" \
   -H "Content-Type: application/json" \
   -X POST \
-  -d '{"expiration": "10m"}' \
-  "${HOST}/maas-api/v1/tokens") && \
-TOKEN=$(echo $TOKEN_RESPONSE | jq -r .token) && \
-echo "Token obtained: ${TOKEN:0:20}..."
+  -d '{"name": "validation-key", "description": "Key for validation", "expiresIn": "1h", "subscription": "simulator-subscription"}' \
+  "${HOST}/maas-api/v1/api-keys") && \
+API_KEY=$(echo $API_KEY_RESPONSE | jq -r .key) && \
+echo "API key obtained: ${API_KEY:0:20}..."
 ```
 
+!!! note "Optional"
+    List your API keys (metadata only; plaintext secrets are never returned):
+    ```bash
+    curl -sSk \
+      -H "Authorization: Bearer $(oc whoami -t)" \
+      -H "Content-Type: application/json" \
+      -X POST \
+      -d '{}' \
+      "${HOST}/maas-api/v1/api-keys/search" | jq .
+    ```
+
+!!! warning "API key shown only once"
+    The plaintext API key is returned **only at creation time**. We do not store the API key, so there is no way to retrieve it again. Store it securely when it is displayed. If you run into errors, see [Troubleshooting](troubleshooting.md).
+
 !!! note
-    For more information about how tokens work, see [Understanding Token Management](../configuration-and-management/token-management.md).
+    `subscription` is the MaaSSubscription metadata name to bind (here `simulator-subscription` matches the [maas-system](https://github.com/opendatahub-io/models-as-a-service/tree/main/docs/samples/maas-system) free sample). Use your own name or omit the field to auto-select by `spec.priority`. For details, see [Understanding Token Management](../configuration-and-management/token-management.md).
 
 ### 3. List Available Models
+
+Each API key is bound to one MaaSSubscription at creation time. `GET /v1/models` with an API key does not require `X-MaaS-Subscription`—the list is scoped to that subscription. (With an OpenShift user token instead of an API key, you can optionally send `X-MaaS-Subscription` to filter when you have access to multiple subscriptions.)
 
 ```bash
 MODELS=$(curl -sSk ${HOST}/maas-api/v1/models \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $TOKEN" | jq -r .) && \
+    -H "Authorization: Bearer $API_KEY" | jq -r .) && \
 echo $MODELS | jq . && \
 MODEL_NAME=$(echo $MODELS | jq -r '.data[0].id') && \
 MODEL_URL=$(echo $MODELS | jq -r '.data[0].url') && \
@@ -61,65 +79,40 @@ echo "Model URL: $MODEL_URL"
 
 ### 4. Test Model Inference Endpoint
 
-Send a request to the model endpoint (should get a 200 OK response):
+Send a request to the model’s OpenAI-compatible **chat completions** API (expect **200 OK**). This example uses **`POST /v1/chat/completions`** with a `messages` array. If your backend only implements **`/v1/completions`** (prompt-based) or another route, adjust the path and JSON body accordingly.
 
 ```bash
-curl -sSk -H "Authorization: Bearer $TOKEN" \
+curl -sSk -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d "{\"model\": \"${MODEL_NAME}\", \"prompt\": \"Hello\", \"max_tokens\": 50}" \
-  "${MODEL_URL}/v1/completions" | jq
+  -d "{\"model\": \"${MODEL_NAME}\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}], \"max_tokens\": 50}" \
+  "${MODEL_URL}/v1/chat/completions" | jq
 ```
 
-### 5. Test Authorization Enforcement
+### 6. Test Authorization Enforcement
 
 Send a request to the model endpoint without a token (should get a 401 Unauthorized response):
 
 ```bash
 curl -sSk -H "Content-Type: application/json" \
-  -d "{\"model\": \"${MODEL_NAME}\", \"prompt\": \"Hello\", \"max_tokens\": 50}" \
-  "${MODEL_URL}/v1/completions" -v
+  -d "{\"model\": \"${MODEL_NAME}\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}], \"max_tokens\": 50}" \
+  "${MODEL_URL}/v1/chat/completions" -v
 ```
 
-### 6. Test Rate Limiting
+### 7. Test Rate Limiting
 
 Send multiple requests to trigger rate limit (should get 200 OK followed by 429 Rate Limit Exceeded after about 4 requests):
 
 ```bash
 for i in {1..16}; do
   curl -sSk -o /dev/null -w "%{http_code}\n" \
-    -H "Authorization: Bearer $TOKEN" \
+    -H "Authorization: Bearer $API_KEY" \
     -H "Content-Type: application/json" \
-    -d "{\"model\": \"${MODEL_NAME}\", \"prompt\": \"Hello\", \"max_tokens\": 50}" \
-    "${MODEL_URL}/v1/completions"
+    -d "{\"model\": \"${MODEL_NAME}\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}], \"max_tokens\": 50}" \
+    "${MODEL_URL}/v1/chat/completions"
 done
 ```
 
-### 7. Verify Component Status
-
-Check that all components are running:
-
-```bash
-kubectl get pods -n maas-api && \
-kubectl get pods -n kuadrant-system && \
-kubectl get pods -n kserve && \
-kubectl get pods -n llm
-```
-
-Check Gateway status:
-
-```bash
-kubectl get gateway -n openshift-ingress maas-default-gateway
-```
-
-Check that policies are enforced:
-
-```bash
-kubectl get authpolicy -A && \
-kubectl get tokenratelimitpolicy -A && \
-kubectl get llminferenceservices -n llm
-```
-
-See the deployment scripts documentation at `scripts/README.md` for more information about validation and troubleshooting.
+See the deployment scripts documentation at `scripts/README.md` and the [Troubleshooting](troubleshooting.md) guide for more information.
 
 ## Automated Validation
 
@@ -156,55 +149,4 @@ kubectl run curl --rm -it --image=curlimages/curl -- \
 
 For detailed TLS configuration options, see [TLS Configuration](../configuration-and-management/tls-configuration.md).
 
-## Troubleshooting
-
-### Common Issues
-
-1. **Getting `501` Not Implemented errors**: Traffic is not making it to the Gateway.
-      - [ ] Verify Gateway status and HTTPRoute configuration
-2. **Getting `401` Unauthorized errors when trying to get a token**: Authentication maas-api is not working.
-      - [ ] Verify `maas-api-auth-policy` AuthPolicy is applied
-      - [ ] Check if your cluster uses a custom token review audience:
-
-      ```bash
-      # Detect your cluster's audience
-      AUD="$(kubectl create token default --duration=10m 2>/dev/null | \
-        cut -d. -f2 | jq -Rr '@base64d | fromjson | .aud[0]' 2>/dev/null)"
-      echo "Cluster audience: ${AUD}"
-      ```
-
-      If the audience is NOT `https://kubernetes.default.svc`, patch the AuthPolicy:
-
-      ```bash
-      # For RHOAI:
-      kubectl patch authpolicy maas-api-auth-policy -n redhat-ods-applications \
-        --type=merge --patch "
-      spec:
-        rules:
-          authentication:
-            openshift-identities:
-              kubernetesTokenReview:
-                audiences:
-                  - ${AUD}
-                  - maas-default-gateway-sa"
-      ```
-
-      For ODH, use namespace `opendatahub` instead of `redhat-ods-applications`.
-3. **Getting `401` errors when trying to get models**: Authentication is not working for the models endpoint.
-      - [ ] Create a new token (default expiration is 10 minutes)
-      - [ ] Verify `gateway-auth-policy` AuthPolicy is applied
-      - [ ] Validate that `system:serviceaccounts:maas-default-gateway-tier-{TIER}` has `post` access to the `llminferenceservices` resource
-        - Note: this should be automated by the ODH Controller
-4. **Getting `404` errors when trying to get models**: The models endpoint is not working.
-      - [ ] Verify `model-route` HTTPRoute exist and is applied
-      - [ ] Verify the model is deployed and the `LLMInferenceService` has the `maas-default-gateway` gateway specified
-      - [ ] Verify that the model is recognized by maas-api by checking the `maas-api/v1/models` endpoint (see [List Available Models](#3-list-available-models))
-5. **Rate limiting not working**: Verify AuthPolicy and TokenRateLimitPolicy are applied
-      - [ ] Verify `gateway-rate-limits` RateLimitPolicy is applied
-      - [ ] Verify TokenRateLimitPolicy is applied (e.g. gateway-default-deny or per-route policies)
-      - [ ] Verify the model is deployed and the `LLMInferenceService` has the `maas-default-gateway` gateway specified
-      - [ ] Verify that the model is rate limited by checking the inference endpoint (see [Test Rate Limiting](#6-test-rate-limiting))
-      - [ ] Verify that the model is token rate limited by checking the inference endpoint (see [Test Rate Limiting](#6-test-rate-limiting))
-6. **Routes not accessible (503 errors)**: Check MaaS Default Gateway status and HTTPRoute configuration
-      - [ ] Verify Gateway is in `Programmed` state: `kubectl get gateway -n openshift-ingress maas-default-gateway`
-      - [ ] Check HTTPRoute configuration and status
+For troubleshooting common issues, see [Troubleshooting](troubleshooting.md).
