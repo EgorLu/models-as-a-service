@@ -88,73 +88,91 @@ kubectl get pods -n openshift-ingress \
 
 ## Horizontal scaling: HPA
 
-On OCP 4.22+, Gateway API supports autoscaling the gateway deployment via a standard Kubernetes HorizontalPodAutoscaler. This allows the gateway to scale out under load rather than relying solely on vertical resource increases.
+!!! warning
+    Do not create a standalone HorizontalPodAutoscaler for the gateway deployment. Recent OpenShift releases provision an HPA for managed gateways automatically, and a second HPA targeting the same deployment leaves both controllers fighting over the replica count. The autoscaler reports `AmbiguousSelector` and stops scaling.
 
-### Create and apply an HPA for the gateway
+Check whether one already exists before doing anything else:
 
-Save the following as `gateway-hpa.yaml` and apply it:
+```bash
+kubectl get hpa -n openshift-ingress \
+  -o custom-columns='NAME:.metadata.name,TARGET:.spec.scaleTargetRef.name,MIN:.spec.minReplicas,MAX:.spec.maxReplicas'
+```
+
+Either way, tune the gateway's autoscaling through the same `parametersRef` ConfigMap used for resources. The `horizontalPodAutoscaler` key overlays the generated HPA when one is managed for you, and creates one when it is not, so a single procedure works on both.
+
+### Add autoscaling to the ConfigMap
+
+Extend `gateway-resource-config.yaml` with the `horizontalPodAutoscaler` key:
 
 ```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
+apiVersion: v1
+kind: ConfigMap
 metadata:
-  name: maas-default-gateway-hpa
+  name: maas-default-gateway-config
   namespace: openshift-ingress
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: maas-default-gateway-openshift-default
-  minReplicas: 2
-  maxReplicas: 5
-  metrics:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-        averageUtilization: 80
-  - type: Resource
-    resource:
-      name: memory
-      target:
-        type: Utilization
-        averageUtilization: 80
+data:
+  deployment: |
+    spec:
+      template:
+        spec:
+          containers:
+          - name: istio-proxy
+            resources:
+              requests:
+                cpu: 200m
+                memory: 512Mi
+              limits:
+                cpu: "4"
+                memory: 2Gi
+  horizontalPodAutoscaler: |
+    spec:
+      minReplicas: 2
+      maxReplicas: 5
+      metrics:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 80
+      - type: Resource
+        resource:
+          name: memory
+          target:
+            type: Utilization
+            averageUtilization: 80
+  podDisruptionBudget: |
+    spec:
+      minAvailable: 1
 ```
 
 ```bash
-kubectl apply -f gateway-hpa.yaml
+kubectl apply -f gateway-resource-config.yaml
 ```
 
-Adjust `maxReplicas` and utilization thresholds based on your traffic patterns. `minReplicas: 2` is recommended for availability during rolling updates and node disruptions. For the HPA `averageUtilization` metric to work, the gateway pod must have CPU and memory `requests` set (see the ConfigMap approach above).
+Adjust `maxReplicas` and utilization thresholds based on your traffic patterns. `minReplicas: 2` keeps the gateway available during rolling updates and node disruptions.
 
-For production deployments, consider adding a PodDisruptionBudget to prevent all gateway replicas from being evicted simultaneously during cluster maintenance. Keep `minAvailable` below the HPA `minReplicas` value, otherwise voluntary evictions such as node drains are blocked entirely:
+Two things to keep in mind:
 
-```yaml
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: maas-default-gateway-pdb
-  namespace: openshift-ingress
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      gateway.networking.k8s.io/gateway-name: maas-default-gateway
-```
+- `averageUtilization` is a percentage of the container's resource **requests**, so the `deployment` key above must set `requests` for CPU and memory. Without them the HPA has no denominator and reports `<unknown>` for the metric.
+- Keep the PodDisruptionBudget `minAvailable` below `minReplicas`. If they are equal, voluntary evictions such as node drains are blocked entirely.
 
-### Verify HPA
+### Verify
 
 ```bash
-# Check HPA status and current replica count
-kubectl get hpa maas-default-gateway-hpa -n openshift-ingress
+# Confirm the HPA reflects the values from the ConfigMap
+kubectl get hpa -n openshift-ingress
 
-# Watch scaling events
-kubectl describe hpa maas-default-gateway-hpa -n openshift-ingress
+# Check that metrics are being read, not reported as <unknown>
+kubectl describe hpa -n openshift-ingress \
+  -l gateway.networking.k8s.io/gateway-name=maas-default-gateway
 ```
 
-!!! note
-    Gateway HPA support requires OCP 4.22 or later. On earlier versions, scale the gateway manually by combining the ConfigMap approach above with a `replicas` field in the deployment patch.
+An `AmbiguousSelector` condition in the `describe` output means more than one HPA targets the gateway deployment. Remove the one you created manually and keep the ConfigMap-driven configuration.
+
+### If the ConfigMap approach is unavailable
+
+On releases where the gateway implementation does not honour the `horizontalPodAutoscaler` key, scale the gateway manually instead by setting `spec.replicas` in the `deployment` key of the same ConfigMap. Do not mix manual replicas with an active HPA.
 
 ## References
 
