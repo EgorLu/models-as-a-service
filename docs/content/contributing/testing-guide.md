@@ -2,6 +2,15 @@
 
 This guide covers what tests exist in the MaaS project, how to run them, and how to add new tests when contributing a feature or fix.
 
+!!! tip "Looking for the cross-repo picture?"
+    This page is scoped to the `models-as-a-service` repository. For the full test
+    landscape across all four repos we own, plus the nightlies, ATRIS, and the Dashboard
+    Cypress suite, see the [Test Knowledge Base](../testing/index.md):
+    [inventory](../testing/test-inventory.md),
+    [pipelines](../testing/ci-pipelines.md),
+    [where to add a test](../testing/contributing-tests.md),
+    [performance](../testing/performance-testing.md).
+
 ## Test Overview
 
 | Type | Location | Language | Runner |
