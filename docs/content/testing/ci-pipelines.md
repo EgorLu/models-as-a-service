@@ -138,7 +138,9 @@ AI_GATEWAY_CONTROLLER_IMAGE=quay.io/opendatahub/odh-ai-gateway-controller:odh-pr
 ```
 
 Pipeline: `.tekton/ai-gateway-controller-group-test.yaml` → `odh-konflux-central`
-`integration-tests/ai-gateway-controller/pr-group-testing-pipeline.yaml`, 4h timeout.
+`integration-tests/ai-gateway-controller/pr-group-testing-pipeline.yaml`, 1h30m
+e2e task timeout (same shape as the MaaS group pipeline: snapshot → ephemeral
+Hypershift → e2e → must-gather → artifacts → PR comment).
 
 Until ATRIS and the `opendatahub-tests` nightlies switch to Praxis, **this is the primary
 automated Praxis coverage**. Gaps are tracked under
@@ -161,9 +163,8 @@ automatically; triage those against the inventory before assuming a product regr
 
 ## Shift-left / TestOps
 
-MaaS is **not** onboarded into `COMPONENTS_TESTS_CONFIG` on `rhoai-test-flow`
-([RHOAIENG-84410](https://issues.redhat.com/browse/RHOAIENG-84410)). Until that lands,
-"shift-left MaaS coverage" means the Konflux group test, not Jenkins.
+MaaS is **not** onboarded into `COMPONENTS_TESTS_CONFIG` on `rhoai-test-flow`.
+Until that lands, "shift-left MaaS coverage" means the Konflux group test, not Jenkins.
 
 To install a specific RHOAI build for manual testing, use the `rhoai-test-flow` Jenkins job
 (`INSTALL_CLUSTER`, `ODS_BUILD_URL`, `UPDATE_CHANNEL=odh-nightly`, `ADD_ICSP=true`,

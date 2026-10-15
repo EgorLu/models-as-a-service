@@ -115,8 +115,8 @@ Repo: [opendatahub-io/ai-gateway-controller](https://github.com/opendatahub-io/a
 
 | Suite | Path | Covers |
 |-------|------|--------|
-| Go unit | `pkg/controller`, `pkg/envelope`, `pkg/publisher`, `pkg/render`, `pkg/resolver`, `pkg/tenant`, `api/...` (20 files) | Reconcile logic, rendering, tenant resolution |
-| kind ExtProc E2E | `test/kind-env/e2e.sh`, `e2e-extproc.sh` | Full ExtProc dataplane on kind, no OpenShift needed |
+| Go unit + envtest | `pkg/tenant` (10), `pkg/render` (3), `pkg/controller` (2), `pkg/envelope` (2), `pkg/guardrail` (2), `pkg/publisher`, `pkg/resolver`, `api/...`, `test/envtest` (6) — 32 files | Reconcile logic, rendering, tenant resolution, guardrail; envtest covers controller against a real API server |
+| kind ExtProc E2E | `test/kind-env/e2e.sh`, `e2e-extproc.sh`, plus `test-namespace-boundary.sh`, `test-provider-credentials.sh`, `test-suite-dispatch.sh` | Full ExtProc dataplane on kind, no OpenShift needed |
 | External model static | `test/external-model/test-static.sh` | Static provider routing with templated manifests |
 | Manifest helper tests | `hack/scripts/test-get-manifests.sh`, `test/e2e/scripts/test-deploy-ai-gateway-controller.sh` | Deploy tooling correctness |
 | **Praxis E2E (runtime checkout of MaaS suite)** | `test/e2e/scripts/run_e2e_tests.sh` + `fetch-maas-e2e.sh` | **Today this is the primary automated Praxis gate** |
@@ -143,7 +143,7 @@ Repo: [opendatahub-io/ai-gateway-payload-processing](https://github.com/opendata
 
 | Suite | Path | Covers |
 |-------|------|--------|
-| Go unit | `pkg/controller/{externalmodel,externalprovider,legacymigration,common}`, `pkg/dynamicmetadata`, `pkg/plugins/api-translation/...` (37 files) | ExternalModel/Provider reconcile, legacy IPP migration, per-provider request translation (OpenAI, Anthropic, Azure, Bedrock, Vertex) |
+| Go unit | `pkg/plugins/api-translation/translator/{openai,anthropic,azure,bedrock,vertex}`, `pkg/plugins/{apikey-injection,model-provider-resolver,nemo,external-metering,maas-headers-guard,passthrough-profile-picker,stream-usage-enforcer}`, `pkg/controller/{externalmodel,externalprovider,legacymigration,common}`, `pkg/dynamicmetadata` — 38 files | ExternalModel/Provider reconcile, legacy IPP migration, per-provider request translation, API-key injection, Nemo profile |
 | kind E2E (ginkgo) | `test/e2e/e2e_test.go`, `e2e_suite_test.go`, driven by `test/e2e/scripts/e2e-ci.sh` + `setup-kind.sh` | ExtProc end-to-end on kind |
 | Provider docs as spec | `docs/providers/*.md`, `docs/testing-with-simulator.md` | How to exercise each provider locally |
 
@@ -201,7 +201,7 @@ Markers: `smoke`, `tier1`, `tier2`, `tier3`, `sanity`, `component_health`,
 |-------|-------|-------|-------|
 | ATRIS / Shepard | ATRIS org | `Jenkinsfile.maas-tests`, `pipelines/maas/config.yaml`, `run-maas-tests.sh` | Runs `test/e2e/tests` from the **midstream** `red-hat-data-services/models-as-a-service` fork. Not on Praxis yet. Dashboard needs VPN. |
 | Dashboard UI E2E | Dashboard team | `odh-dashboard` Cypress `modelsAsAService` specs | Subscription / AuthPolicy / API key CRUD plus one inference per test |
-| TestOps shift-left | TestOps / DevTestOps | Jenkins `rhoai-test-flow` → `COMPONENTS_TESTS_CONFIG` | MaaS **not onboarded yet** — [RHOAIENG-84410](https://issues.redhat.com/browse/RHOAIENG-84410) |
+| TestOps shift-left | TestOps / DevTestOps | Jenkins `rhoai-test-flow` → `COMPONENTS_TESTS_CONFIG` | MaaS **not onboarded yet** (no ticket verified; ask TestOps for current state) |
 
 ---
 

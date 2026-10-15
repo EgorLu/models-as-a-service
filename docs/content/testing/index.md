@@ -64,10 +64,10 @@ flowchart LR
 | PostgreSQL integration | models-as-a-service | Go (build tag) | opt-in | No | MaaS |
 | MaaS E2E (pytest) | models-as-a-service | Python | 35 modules / ~309 tests | Yes (Konflux group-test) | MaaS |
 | Operator chaos | models-as-a-service | GH Action | 1 workflow | Yes (path-filtered) | MaaS |
-| AIGC controller unit | ai-gateway-controller | Go | 20 files | Yes | AIGC |
-| AIGC kind ExtProc E2E | ai-gateway-controller | Bash + kind | 2 scripts | Not yet ([RHOAIENG-97471](https://issues.redhat.com/browse/RHOAIENG-97471)) | AIGC |
+| AIGC unit + envtest | ai-gateway-controller | Go | 32 files | Yes | AIGC |
+| AIGC kind ExtProc E2E | ai-gateway-controller | Bash + kind | 5 scripts | Not gated in CI (manual/kind runs) | AIGC |
 | AIGC Praxis E2E (runtime checkout of MaaS E2E) | ai-gateway-controller | Python (fetched) | allowlist subset | Yes | AIGC + MaaS |
-| AIGPP unit | ai-gateway-payload-processing | Go | 37 files | Yes | Praxis |
+| AIGPP unit | ai-gateway-payload-processing | Go | 38 files | Yes | Praxis |
 | AIGPP kind E2E | ai-gateway-payload-processing | Go (ginkgo) | 1 suite | Yes | Praxis |
 | AIGO unit + envtest | ai-gateway-operator | Go | 13 files | Yes | AIGO |
 | AIGO E2E | ai-gateway-operator | Go | 4 files | Manual / cluster | AIGO |

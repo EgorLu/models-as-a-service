@@ -99,9 +99,8 @@ with it rather than duplicate it. Three items remain ours to build:
 
 - The group pipeline already does cluster provisioning, image resolution from a composite
   snapshot, artifact publishing, and PR commenting. A scale lane reuses all of it.
-- Jenkins shift-left (`COMPONENTS_TESTS_CONFIG`) is not onboarded for MaaS at all
-  ([RHOAIENG-84410](https://issues.redhat.com/browse/RHOAIENG-84410)), so building
-  performance there means solving onboarding first.
+- Jenkins shift-left (`COMPONENTS_TESTS_CONFIG`) is not onboarded for MaaS at all, so
+  building performance there means solving onboarding first.
 - Results stay next to the functional E2E artifacts, which is where anyone debugging a
   regression will already be looking.
 
