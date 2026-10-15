@@ -1,11 +1,40 @@
 # Performance testing
 
-The honest state: **there is no automated performance or scale suite in any of the four
-repos today.** Everything we know about MaaS under load came from manual runs, PSAP
-findings, and incident triage. This page records what exists, what we learned, and what
-has to be built.
+The honest state: **no automated performance or scale suite lives in any of the four
+repos we own.** But MaaS *is* load-tested automatically — by PSAP, in their own
+pipelines, since August 2026. Read the next two sections before anything else: the
+first records what exists outside our repos, the second what exists inside them.
 
 ## What exists today
+
+### Outside our repos: the PSAP CPT pipeline
+
+PSAP (Vishnu Challa) has been running an automated MaaS performance pipeline since
+August 2026. It is not in any MaaS repo; it is assembled from their tooling:
+
+| Piece | Where | Notes |
+|-------|-------|-------|
+| Scheduled trigger | [openshift/release PR #83484](https://github.com/openshift/release/pull/83484) | Prow periodic (`maas-perf`) job, ROSA profile (3 masters + 3 workers) |
+| Workload definition | [e2e-benchmarking `maas-gateway-perf`](https://github.com/cloud-bulldozer/e2e-benchmarking/tree/master/workloads/maas-gateway-perf) | Day-2 ops + benchmark driver; runs standalone via `run.sh` or from Prow |
+| Load generator | kube-burner-ocp + GuideLLM K8s Jobs | A/B pairs: direct-to-simulator baseline vs gateway-routed, across providers x payload sizes x concurrency (16-1024) |
+| Deploy under test | MaaS `deploy.sh` at a pinned `MAAS_REF` | Full stack: cert-manager, LWS, Kuadrant/RHCL, operator, DSC, PostgreSQL, gateway, controller, maas-api |
+| Results | Elasticsearch/OpenSearch under run UUID + Grafana | [Dashboard](https://grafana.rdu2.scalelab.redhat.com:3000/d/dfvrhwyo2edxca/kube-burner-ocp-wrapper-vchalla-maas-experiments) (viewer/viewer) |
+| Regression detection | Orion (Hunter change-point detection, 10% default threshold) | Auto-files Jira with run UUID, metrics, suspected PR; auto-closes on recovery |
+| Querying | ChaiBot NL queries via Orion MCP backend | Answers "why did p99 go up last week" style questions |
+
+Key facts for contributors: the pipeline works upstream (Prow) and downstream
+(OpenShift CI is a downstream wrapper). Running the workload standalone needs an
+existing OpenShift 4.19+ cluster with cluster-admin and `oc`; see the workload README
+for the env-var matrix (`OPERATOR_TYPE`, `MAAS_REF`, `PROVIDERS`, `PAYLOAD_SIZES`,
+`CONCURRENCY_LEVELS`). PR-triggered runs (every MaaS PR vs the nightly baseline) are
+the direction PSAP wants next, and PR-run metadata is kept separate from baseline data
+so the baseline stays clean.
+
+Caveat for CI-number interpretation: PSAP uses ephemeral clusters; absolute numbers
+are drift detection against yesterday's run, not capacity planning data. Same
+philosophy as the Konflux scale-lane idea below.
+
+### Inside our repos
 
 | Thing | Where | Status |
 |-------|-------|--------|
@@ -18,8 +47,10 @@ has to be built.
 | Auth timeout 200ms → 2s | [RHOAIENG-79789](https://issues.redhat.com/browse/RHOAIENG-79789) | Shipped |
 | GuideLLM against a MaaS endpoint | [RHOAIENG-94562](https://issues.redhat.com/browse/RHOAIENG-94562) | Blocked: `/health` not reachable through MaaS |
 
-No load generator (k6, locust, vegeta, GuideLLM) is wired into any pipeline. No latency
-or throughput threshold gates any merge. No scale fixture exists for 1K+ subscriptions.
+No load generator (k6, locust, vegeta, GuideLLM) is wired into any pipeline *we* run;
+no latency or throughput threshold gates any merge; no scale fixture exists for 1K+
+subscriptions. (PSAP's pipeline above covers gateway-level A/B load, not the
+subscription-scale fixtures this repo needs.)
 
 ## What we learned the hard way
 
@@ -46,23 +77,23 @@ We ship subscription-cardinality and replica-count knobs, and we document resour
 workarounds, but nothing re-validates them. A regression that doubles reconcile time or
 re-introduces the O(N) route scan passes CI green today.
 
-What a shift-left performance capability needs, in order:
+The PSAP CPT pipeline (above) already provides, externally: a load generator, baseline
+capture, scheduled runs, change-point regression detection, and automated Jira filing.
+That raises the bar for what "building our own" means — anything we add should compose
+with it rather than duplicate it. Three items remain ours to build:
 
 1. **A scale fixture.** Parameterised N subscriptions / N models / N tenants, reusable
    from both the MaaS `test/e2e` harness and a standalone load job. Without this,
-   everything else is bespoke.
+   everything else is bespoke. This is also the piece PSAP's gateway A/B runs do not
+   cover — they exercise one deployed MaaS stack, not 1K+ subscription reconcile.
 2. **A load generator decision.** GuideLLM is the RHOAI-aligned choice for inference load
    and is already blocked on [RHOAIENG-94562](https://issues.redhat.com/browse/RHOAIENG-94562).
    k6 or vegeta is lighter for pure gateway/auth-path load. Pick one for the auth path and
-   one for the inference path; do not build two half-solutions.
-3. **Baseline capture.** Record p50/p95/p99 for: token mint, `/v1/models`, auth decision,
-   first-token latency. Store results as a CI artifact, the same way junit XML is stored
-   by the group-test pipeline.
-4. **Regression thresholds, non-blocking first.** Run on a schedule against main, report
-   drift, do not gate. Only promote to a gate once the noise floor is known.
-5. **A home.** The Konflux group test already provisions an ephemeral Hypershift cluster
-   and publishes artifacts — that's the natural host for a scheduled scale lane, separate
-   from the per-PR lane so it doesn't blow the 1h30m e2e budget.
+   one for the inference path; do not build two half-solutions. Whatever we pick should
+   be runnable from kube-burner so the PSAP pipeline can drive it.
+3. **A home for results we own.** PSAP's ES/Grafana/Orion stack is theirs; if the MaaS
+   team needs gate-relevant numbers, they either live in PSAP's stack or in the Konflux
+   artifact store. Decide which, deliberately, before building a third place.
 
 ## Why Konflux and not Jenkins
 
