@@ -10,7 +10,7 @@ Where each suite actually runs, what triggers it, and which ones can block a mer
 | `maas-controller-ci.yml` | GitHub Actions | PR touching `maas-controller/**` and embedded manifests | maas-controller unit + lint | Yes |
 | `build-test.yml` | GitHub Actions | PR touching controller api/cmd/pkg/Makefile/manifests | Build + manifest render | Yes |
 | `e2e-collect.yml` | GitHub Actions | PR touching `test/e2e/**`, push to main | `pytest --collect-only` on Python 3.11 | Yes |
-| `operator-chaos.yml` | GitHub Actions | PR touching controller api/controller/reconciler + deployment base | Operator chaos | Yes (path-filtered) |
+| `operator-chaos.yml` | GitHub Actions | PR touching maas-controller api/pkg/reconciler, `deployment/**`, `maas-api/deploy/**`, `chaos/knowledge/**`, controller go.mod/sum | Operator chaos | Yes (path-filtered) |
 | `openapi-validation.yml` | GitHub Actions | PR touching `maas-api/openapi3.yaml` | Spectral lint | Yes |
 | `semgrep-tls.yml`, `tls-lint.yml`, `actionlint.yml`, `pr-title-validation.yml`, `disconnected-readiness.yml` | GitHub Actions | PR | Static checks | Yes |
 | `approval-policy.yml` | GitHub Actions | PR + reviews | Advisory 1-vs-2 approval count by changed paths | Advisory (not yet a required check) |
@@ -18,7 +18,7 @@ Where each suite actually runs, what triggers it, and which ones can block a mer
 | `scorecard.yml` | GitHub Actions | push main + weekly Mon 03:30 UTC | OpenSSF scorecard | No |
 | `docs.yml`, `update-docs-latest.yml` | GitHub Actions | docs paths / manual | mkdocs build + publish | Docs only |
 | `promote-main-to-stable.yml`, `promote-stable-to-rhoai.yml`, `create-release.yml` | GitHub Actions | Sunday 00:00 UTC + manual | Branch promotion, releases | No |
-| **`maas-group-test`** | **Konflux (Tekton PAC)** | `pull_request` on main, `/group-test` comment, `group-test` event | **Full MaaS E2E on ephemeral Hypershift** | **Yes** |
+| **`maas-group-test`** | **Konflux (Tekton PAC)** | `/group-test` comment, `group-test` event, or `pull_request` targeting **stable** (main→stable promotion PRs; see `.tekton/maas-group-test.yaml` CEL). On main PRs it runs when invoked, not automatically | **Full MaaS E2E on ephemeral Hypershift** | **Yes (when it runs)** |
 | `early-gate-ci-build` / `early-gate-ci-test` | Konflux | `issue_comment` | Early-gate build + test | On demand |
 | `odh-maas-{api,controller,discovery}-{pull-request,push,push-stable}` | Konflux | PR / push / push to stable | Image builds | Yes (build) |
 | `ai-gateway-controller-group-test` | Konflux | PR on main, `/group-test` | AIGC + runtime-checkout MaaS E2E (Praxis gate) | Yes |
@@ -98,17 +98,29 @@ Key environment variables:
 
 ### Local runs
 
-```bash
-# Full deploy + E2E (what CI does)
-kustomize build test/e2e/fixtures | kubectl apply -f -
-SKIP_DEPLOYMENT=true EXTERNAL_OIDC=false ./test/e2e/scripts/prow_run_smoke_test.sh
+Toolchain first: Go (see `maas-api/go.mod` for the exact version), `oc` (OpenShift CLI,
+not plain kubectl — the scripts call `oc`), Python 3.11+, and network access for the
+first `pip install`. The runner scripts create their own `.venv` from
+`test/e2e/requirements.txt`.
 
-# Quick pytest only, cluster already up
+```bash
+# Full deploy + E2E (the CI path: deploy platform, models, tokens, then test)
+./test/e2e/scripts/prow_run_smoke_test.sh
+
+# Same, but reuse an already-deployed cluster (skip the deploy phase)
+SKIP_DEPLOYMENT=true ./test/e2e/scripts/prow_run_smoke_test.sh
+
+# Quick pytest only, cluster already up with MaaS + a simulated model backend
+# (needs a logged-in oc with cluster-admin; the default fixture model is
+# facebook-opt-125m-simulated)
 ./test/e2e/run-tests-quick.sh
 
-# All modules locally
+# Smoke helper only
 ./test/e2e/smoke.sh
 ```
+
+The e2e suite needs an OpenShift cluster with MaaS already deployed and a reachable
+simulated model backend — it is not a plain-kubernetes test.
 
 Unit tests:
 

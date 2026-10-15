@@ -58,7 +58,9 @@ something a PR gate should have caught, move the test up, don't copy it.
    `external`, `serial`.
 
    - `readonly` — must not mutate cluster state.
-   - `serial` — destructive (restarts a controller, deletes a CRD). Runs in the second pass.
+   - `serial` — don't tag `xdist_group("serial")` yourself: `conftest.py` auto-derives
+     the serial group from `@pytest.mark.serial`. Mark destructive tests (restart a
+     controller, delete a CRD) with `@pytest.mark.serial`; they run in the second pass.
    - Tenant groups — anything that creates or mutates AITenants.
 
    Separately from groups, mark slow or env-heavy tests `@pytest.mark.nightly` —

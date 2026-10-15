@@ -62,7 +62,7 @@ flowchart LR
 | `maas-controller` unit | models-as-a-service | Go | 658 funcs | Yes (GH Actions) | MaaS |
 | `maas-discovery` unit | models-as-a-service | Go | 106 funcs | Yes (GH Actions) | MaaS |
 | PostgreSQL integration | models-as-a-service | Go (build tag) | opt-in | No | MaaS |
-| MaaS E2E (pytest) | models-as-a-service | Python | 35 modules / ~309 tests | Yes (Konflux group-test) | MaaS |
+| MaaS E2E (pytest) | models-as-a-service | Python | 34 test modules / ~309 tests | Yes (Konflux group-test) | MaaS |
 | Operator chaos | models-as-a-service | GH Action | 1 workflow | Yes (path-filtered) | MaaS |
 | AIGC unit + envtest | ai-gateway-controller | Go | 32 files | Yes | AIGC |
 | AIGC kind ExtProc E2E | ai-gateway-controller | Bash + kind | 5 scripts | Not yet ([RHOAIENG-97471](https://issues.redhat.com/browse/RHOAIENG-97471)) | AIGC |

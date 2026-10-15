@@ -44,7 +44,17 @@ Re-verify with: `git grep -c "^func Test" <ref> -- maas-api | awk -F: '{s+=$NF} 
 | **maas-discovery total** | **106** | |
 
 Run: `make -C maas-api test`, `make -C maas-controller test`, `make -C maas-discovery test`.
-Each produces `coverage.html` in its component directory.
+Each produces `coverage.html` in its component directory **on success**; if any package
+fails, make aborts before the HTML step and only a partial `coverage.out` exists.
+
+!!! warning "Known issue (as of 2026-10-15, upstream main `0af16844`)"
+    `make -C maas-api test` fails to build on a clean checkout: PR
+    [#1343](https://github.com/opendatahub-io/models-as-a-service/pull/1343) changed the
+    `ModelAccessChecker.AuthorizedModels` interface (now returns `(map, error)`) and
+    updated `selector_test.go`, but `handler_test.go`'s `panickingModelAccessChecker`
+    still implements the old signature. The PR's own merge checks did not run the
+    maas-api unit job. Until fixed, `go test ./internal/subscription/` fails; the other
+    14 packages pass. If you hit this, it's not your change.
 
 ### 1.2 PostgreSQL integration
 
@@ -54,7 +64,8 @@ not `testing.Short()`, and `TEST_DATABASE_URL` set.
 
 ### 1.3 E2E (pytest) — the shared suite
 
-`test/e2e/tests/` — 35 modules, ~309 test functions. This is the suite
+`test/e2e/tests/` — 34 test modules (~309 test functions) plus `test_helper.py`, a
+helper named like a test module that contains none. This is the suite
 `ai-gateway-controller` checks out at runtime (pinned in `test/maas-e2e.lock`), so
 changes here ripple into another repo's merge gate.
 
