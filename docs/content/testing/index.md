@@ -65,13 +65,13 @@ flowchart LR
 | MaaS E2E (pytest) | models-as-a-service | Python | 35 modules / ~309 tests | Yes (Konflux group-test) | MaaS |
 | Operator chaos | models-as-a-service | GH Action | 1 workflow | Yes (path-filtered) | MaaS |
 | AIGC unit + envtest | ai-gateway-controller | Go | 32 files | Yes | AIGC |
-| AIGC kind ExtProc E2E | ai-gateway-controller | Bash + kind | 5 scripts | Not gated in CI (manual/kind runs) | AIGC |
+| AIGC kind ExtProc E2E | ai-gateway-controller | Bash + kind | 5 scripts | Not yet ([RHOAIENG-97471](https://issues.redhat.com/browse/RHOAIENG-97471)) | AIGC |
 | AIGC Praxis E2E (runtime checkout of MaaS E2E) | ai-gateway-controller | Python (fetched) | allowlist subset | Yes | AIGC + MaaS |
 | AIGPP unit | ai-gateway-payload-processing | Go | 38 files | Yes | Praxis |
 | AIGPP kind E2E | ai-gateway-payload-processing | Go (ginkgo) | 1 suite | Yes | Praxis |
 | AIGO unit + envtest | ai-gateway-operator | Go | 13 files | Yes | AIGO |
 | AIGO E2E | ai-gateway-operator | Go | 4 files | Manual / cluster | AIGO |
-| MaaS nightlies | opendatahub-tests | Python | ~150 tests / 9 areas | No (nightly signal) | MaaS + QE |
+| MaaS nightlies | opendatahub-tests | Python | ~70 modules / 11 areas | No (nightly signal) | MaaS + QE |
 | ATRIS / Shepard | atris pipelines | Python (reuses midstream `test/e2e`) | varies | No | ATRIS org |
 | Dashboard UI E2E | odh-dashboard | Cypress | `modelsAsAService` specs | Dashboard CI | Dashboard team |
 | Performance / scale | — (PSAP CPT pipeline) | — | external | No | see [Performance testing](performance-testing.md) |
@@ -79,6 +79,14 @@ flowchart LR
 Counts are a snapshot taken when this page was written; treat them as orders of
 magnitude, not contract. The authoritative number is whatever `go test ./...` and
 `pytest --collect-only` report today.
+
+## Keeping this current
+
+This knowledge base is only as good as its last verification. The rule: **any PR that
+adds, moves, or removes a test, suite, or pipeline updates the relevant page here in the
+same PR.** Reviewers: treat an unchanged KB on a test-touching PR as a review blocker,
+the same way you would an unchanged OWNERS file. Counts are snapshots (see the "as of"
+notes); when you touch a page, re-run the count commands in its header comment if any.
 
 ## Rules of thumb
 

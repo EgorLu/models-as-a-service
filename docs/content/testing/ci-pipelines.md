@@ -163,8 +163,9 @@ automatically; triage those against the inventory before assuming a product regr
 
 ## Shift-left / TestOps
 
-MaaS is **not** onboarded into `COMPONENTS_TESTS_CONFIG` on `rhoai-test-flow`.
-Until that lands, "shift-left MaaS coverage" means the Konflux group test, not Jenkins.
+MaaS is **not** onboarded into `COMPONENTS_TESTS_CONFIG` on `rhoai-test-flow`
+(spike: [RHOAIENG-84410](https://issues.redhat.com/browse/RHOAIENG-84410)). Until that
+lands, "shift-left MaaS coverage" means the Konflux group test, not Jenkins.
 
 To install a specific RHOAI build for manual testing, use the `rhoai-test-flow` Jenkins job
 (`INSTALL_CLUSTER`, `ODS_BUILD_URL`, `UPDATE_CHANNEL=odh-nightly`, `ADD_ICSP=true`,

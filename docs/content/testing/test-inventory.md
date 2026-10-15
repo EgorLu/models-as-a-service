@@ -12,6 +12,8 @@ Repo: [opendatahub-io/models-as-a-service](https://github.com/opendatahub-io/mod
 ### 1.1 Go unit tests
 
 Counts as of 2026-10-15 (upstream main `0af16844`). Treat as orders of magnitude.
+Re-verify with: `git grep -c "^func Test" <ref> -- maas-api | awk -F: '{s+=$NF} END {print s}'`
+(same for maas-controller, maas-discovery) and `grep -c "def test_" test/e2e/tests/*.py | awk -F: '{s+=$NF} END {print s}'`.
 
 | Package | Tests | What it covers |
 |---------|-------|----------------|
@@ -102,10 +104,17 @@ and run in an extra pass only when `MAAS_PYTEST_INCLUDE_NIGHTLY=true`.
 Helpers (not tests): `conftest.py`, `test_helper.py`, `multitenancy_helpers.py`,
 `worker_tenant_fixtures.py`.
 
-### 1.4 Chaos
+### 1.4 Chaos / upgrade-breaking-change detection
 
-`chaos/knowledge/` + `.github/workflows/operator-chaos.yml` — operator chaos validation,
-path-filtered to controller API/reconciler and deployment manifests.
+`chaos/knowledge/maas.yaml` + `.github/workflows/operator-chaos.yml`. Uses the
+[opendatahub-io/operator-chaos](https://github.com/opendatahub-io/operator-chaos) tool
+(pinned by commit) against a declarative knowledge model of the controller's topology
+(managed resources, webhooks, finalizers, steady-state checks). On every PR touching
+controller API/pkg/reconciler, deployment manifests, or the knowledge model itself, the
+workflow validates the model, runs local preflight, then diffs the PR's knowledge model
+and CRD schemas against the base branch and **fails on breaking changes**. Purpose:
+catch upgrade-breaking regressions at PR time (L1-L2 maturity today; L3-L4 future).
+See `chaos/knowledge/README.md`.
 
 ---
 
@@ -180,14 +189,15 @@ Path: `tests/ai_gateway/models_as_a_service/`
 |------|---------|--------|
 | `maas_subscription/` | 15 | Subscription enforcement, access control, filtering, rate-limit exemption, cascade deletion, multi-sub / multi-AuthPolicy, llm-d load balancing and prefix cache |
 | `maas_api_key/` | 11 | Key CRUD, authorization, expiration, bulk ops, gateway rejection, tenant field, deny-by-default, `X-API-Key` |
-| `multitenancy/` | 9 (`aitenant`, `isolation`, `inference`, `maas_api`) | AITenant bootstrap/cleanup, auth isolation, per-tenant maas-api routing |
+| `multitenancy/` | 12 (`aitenant`, `isolation`, `inference`, `maas_api`) | AITenant bootstrap/cleanup, auth isolation, per-tenant maas-api routing |
 | `body_base_routing/pre_auth_model_header/` | 5 | BBR Envoy filter, pre/post-auth inference, BBR rate limits |
 | `external_model/` | 5 | Discovery, egress, auth, negative, cleanup |
 | `component_health/` | 4 | maas-api, maas-controller, ai-gateway-controller, tenant health |
 | `oidc_tests/` | 4 | Token flow, model access, multi-user, header injection |
 | `observability/` | 2 | Metrics presence, enable path |
 | `praxis/` | 2 | AITenant Praxis annotation, legacy IPP path |
-| `upgrade/` | 2 | Pre/post-upgrade survival, ExternalModel legacy migration |
+| `upgrade/` | 3 | Pre/post-upgrade survival, ExternalModel legacy migration |
+| `maas_cleanup/` | 1 | Post-run cleanup of MaaS resources |
 | root modules | 6 | `/v1/models` + chat completions, RBAC E2E, request/token rate limits, token revoke, tokens |
 
 Markers: `smoke`, `tier1`, `tier2`, `tier3`, `sanity`, `component_health`,
@@ -199,9 +209,9 @@ Markers: `smoke`, `tier1`, `tier2`, `tier3`, `sanity`, `component_health`,
 
 | Suite | Owner | Where | Notes |
 |-------|-------|-------|-------|
-| ATRIS / Shepard | ATRIS org | `Jenkinsfile.maas-tests`, `pipelines/maas/config.yaml`, `run-maas-tests.sh` | Runs `test/e2e/tests` from the **midstream** `red-hat-data-services/models-as-a-service` fork. Not on Praxis yet. Dashboard needs VPN. |
-| Dashboard UI E2E | Dashboard team | `odh-dashboard` Cypress `modelsAsAService` specs | Subscription / AuthPolicy / API key CRUD plus one inference per test |
-| TestOps shift-left | TestOps / DevTestOps | Jenkins `rhoai-test-flow` → `COMPONENTS_TESTS_CONFIG` | MaaS **not onboarded yet** (no ticket verified; ask TestOps for current state) |
+| ATRIS / Shepard | ATRIS org | internal ATRIS pipeline definitions (`Jenkinsfile.maas-tests`, `pipelines/maas/config.yaml`, `run-maas-tests.sh` — held in ATRIS's internal repos, not public; path names per team lore, verify with ATRIS) | Runs `test/e2e/tests` from the **midstream** `red-hat-data-services/models-as-a-service` fork. Not on Praxis yet. Dashboard needs VPN. |
+| Dashboard UI E2E | Dashboard team | `odh-dashboard` `packages/cypress/cypress/tests/e2e/maas/` (5 `.cy.ts` specs: Subscriptions, Policies, API keys, External models, Overview) + `gen-ai/testGenAiMaaS.cy.ts` + page objects at `pages/modelsAsAService.ts` | Subscription / AuthPolicy / API key CRUD, external models, overview |
+| TestOps shift-left | TestOps / DevTestOps | Jenkins `rhoai-test-flow` → `COMPONENTS_TESTS_CONFIG` | MaaS **not onboarded yet** — spike [RHOAIENG-84410](https://issues.redhat.com/browse/RHOAIENG-84410) (Ishita) |
 
 ---
 
@@ -209,7 +219,7 @@ Markers: `smoke`, `tier1`, `tier2`, `tier3`, `sanity`, `component_health`,
 
 | Repo | Approvers (OWNERS) |
 |------|--------------------|
-| models-as-a-service | chaitanya1731, jland-redhat, dmytro-zaharnytskyi, SB159, ishitasequeira, yu-teo, somya-bhatnagar, liangwen12year, ryancham715, jrhyness, EgorLu, ahadas, mariusdanciu |
+| models-as-a-service | chaitanya1731, jland-redhat, dmytro-zaharnytskyi, SB159, ishitasequeira, yu-teo, somya-bhatnagar, liangwen12year, ryancham715, jrhyness, EgorLu, ahadas, mariusdanciu, pierDipi, bartoszmajsak, israel-hdez |
 | ai-gateway-controller | nerdalert, jland-redhat, ishitasequeira, chaitanya1731, ryancham715, shaneutt, aslakknutsen, pierDipi, bartoszmajsak |
 | ai-gateway-payload-processing | nirrozenbaum, nerdalert, jland-redhat, noyitz, yossiovadia, szedan-rh, chaitanya1731 |
 | ai-gateway-operator | chaitanya1731, jland-redhat, ishitasequeira, jrhyness, somya-bhatnagar, pierDipi, bartoszmajsak, llm-d-team |

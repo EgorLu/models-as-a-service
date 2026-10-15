@@ -18,7 +18,7 @@ August 2026. It is not in any MaaS repo; it is assembled from their tooling:
 | Workload definition | [e2e-benchmarking `maas-gateway-perf`](https://github.com/cloud-bulldozer/e2e-benchmarking/tree/master/workloads/maas-gateway-perf) | Day-2 ops + benchmark driver; runs standalone via `run.sh` or from Prow |
 | Load generator | kube-burner-ocp + GuideLLM K8s Jobs | A/B pairs: direct-to-simulator baseline vs gateway-routed, across providers x payload sizes x concurrency (16-1024) |
 | Deploy under test | MaaS `deploy.sh` at a pinned `MAAS_REF` | Full stack: cert-manager, LWS, Kuadrant/RHCL, operator, DSC, PostgreSQL, gateway, controller, maas-api |
-| Results | Elasticsearch/OpenSearch under run UUID + Grafana | [Dashboard](https://grafana.rdu2.scalelab.redhat.com:3000/d/dfvrhwyo2edxca/kube-burner-ocp-wrapper-vchalla-maas-experiments) (viewer/viewer) |
+| Results | Elasticsearch/OpenSearch under run UUID + Grafana | [Dashboard](https://grafana.rdu2.scalelab.redhat.com:3000/d/dfvrhwyo2edxca/kube-burner-ocp-wrapper-vchalla-maas-experiments) (read-only viewer access; ask PSAP for credentials) |
 | Regression detection | Orion (Hunter change-point detection, 10% default threshold) | Auto-files Jira with run UUID, metrics, suspected PR; auto-closes on recovery |
 | Querying | ChaiBot NL queries via Orion MCP backend | Answers "why did p99 go up last week" style questions |
 
@@ -99,7 +99,8 @@ with it rather than duplicate it. Three items remain ours to build:
 
 - The group pipeline already does cluster provisioning, image resolution from a composite
   snapshot, artifact publishing, and PR commenting. A scale lane reuses all of it.
-- Jenkins shift-left (`COMPONENTS_TESTS_CONFIG`) is not onboarded for MaaS at all, so
+- Jenkins shift-left (`COMPONENTS_TESTS_CONFIG`) is not onboarded for MaaS at all
+  (spike: [RHOAIENG-84410](https://issues.redhat.com/browse/RHOAIENG-84410)), so
   building performance there means solving onboarding first.
 - Results stay next to the functional E2E artifacts, which is where anyone debugging a
   regression will already be looking.
