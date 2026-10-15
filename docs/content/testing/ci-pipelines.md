@@ -13,7 +13,7 @@ Where each suite actually runs, what triggers it, and which ones can block a mer
 | `operator-chaos.yml` | GitHub Actions | PR touching maas-controller api/pkg/reconciler, `deployment/**`, `maas-api/deploy/**`, `chaos/knowledge/**`, controller go.mod/sum | Operator chaos | Yes (path-filtered) |
 | `openapi-validation.yml` | GitHub Actions | PR touching `maas-api/openapi3.yaml` | Spectral lint | Yes |
 | `semgrep-tls.yml`, `tls-lint.yml`, `actionlint.yml`, `pr-title-validation.yml`, `disconnected-readiness.yml` | GitHub Actions | PR | Static checks | Yes |
-| `approval-policy.yml` | GitHub Actions | PR + reviews | Advisory 1-vs-2 approval count by changed paths | Advisory (not yet a required check) |
+| `approval-policy.yml` | GitHub Actions | PR + reviews | Advisory 1-vs-2 approval count by changed paths | Advisory only, does not block |
 | `update-payload-processing.yml` | GitHub Actions | Manual | Opens PR bumping the pinned aigpp commit + image | No (utility) |
 | `scorecard.yml` | GitHub Actions | push main + weekly Mon 03:30 UTC | OpenSSF scorecard | No |
 | `docs.yml`, `update-docs-latest.yml` | GitHub Actions | docs paths / manual | mkdocs build + publish | Docs only |
@@ -182,4 +182,4 @@ lands, "shift-left MaaS coverage" means the Konflux group test, not Jenkins.
 To install a specific RHOAI build for manual testing, use the `rhoai-test-flow` Jenkins job
 (`INSTALL_CLUSTER`, `ODS_BUILD_URL`, `UPDATE_CHANNEL=odh-nightly`, `ADD_ICSP=true`,
 `RHODS_DEPLOYMENT_TYPE=Cli`). Enabling `RUN_TESTS` / `COMPONENTS_TESTS_CONFIG` there runs
-the generic shift-left tiers, which currently do not include MaaS.
+the generic shift-left tiers, which do not include MaaS.

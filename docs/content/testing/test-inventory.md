@@ -47,15 +47,6 @@ Run: `make -C maas-api test`, `make -C maas-controller test`, `make -C maas-disc
 Each produces `coverage.html` in its component directory **on success**; if any package
 fails, make aborts before the HTML step and only a partial `coverage.out` exists.
 
-!!! warning "Known issue (as of 2026-10-15, upstream main `0af16844`)"
-    `make -C maas-api test` fails to build on a clean checkout: PR
-    [#1343](https://github.com/opendatahub-io/models-as-a-service/pull/1343) changed the
-    `ModelAccessChecker.AuthorizedModels` interface (now returns `(map, error)`) and
-    updated `selector_test.go`, but `handler_test.go`'s `panickingModelAccessChecker`
-    still implements the old signature. The PR's own merge checks did not run the
-    maas-api unit job. Until fixed, `go test ./internal/subscription/` fails; the other
-    14 packages pass. If you hit this, it's not your change.
-
 ### 1.2 PostgreSQL integration
 
 `test/integration/postgresql.sh` — JSONB storage, GIN index queries, NULL handling against
