@@ -56,29 +56,29 @@ flowchart LR
 
 ## Suites at a glance
 
-| Suite | Repo | Language | Count | Blocks merge | Owner |
-|-------|------|----------|-------|--------------|-------|
-| `maas-api` unit | models-as-a-service | Go | 369 funcs | Yes (GH Actions) | MaaS |
-| `maas-controller` unit | models-as-a-service | Go | 658 funcs | Yes (GH Actions) | MaaS |
-| `maas-discovery` unit | models-as-a-service | Go | 106 funcs | Yes (GH Actions) | MaaS |
-| PostgreSQL integration | models-as-a-service | Go (build tag) | opt-in | No | MaaS |
-| MaaS E2E (pytest) | models-as-a-service | Python | 34 test modules / ~309 tests | Yes (Konflux group-test) | MaaS |
-| Operator chaos | models-as-a-service | GH Action | 1 workflow | Yes (path-filtered) | MaaS |
-| AIGC unit + envtest | ai-gateway-controller | Go | 32 files | Yes | AIGC |
-| AIGC kind ExtProc E2E | ai-gateway-controller | Bash + kind | 5 scripts | Not yet ([RHOAIENG-97471](https://issues.redhat.com/browse/RHOAIENG-97471)) | AIGC |
-| AIGC Praxis E2E (runtime checkout of MaaS E2E) | ai-gateway-controller | Python (fetched) | allowlist subset | Yes | AIGC + MaaS |
-| AIGPP unit | ai-gateway-payload-processing | Go | 38 files | Yes | Praxis |
-| AIGPP kind E2E | ai-gateway-payload-processing | Go (ginkgo) | 1 suite | Yes | Praxis |
-| AIGO unit + envtest | ai-gateway-operator | Go | 13 files | Yes | AIGO |
-| AIGO E2E | ai-gateway-operator | Go | 4 files | Manual / cluster | AIGO |
-| MaaS nightlies | opendatahub-tests | Python | ~70 modules / 11 areas | No (nightly signal) | MaaS + QE |
-| ATRIS / Shepard | atris pipelines | Python (reuses midstream `test/e2e`) | varies | No | ATRIS org |
-| Dashboard UI E2E | odh-dashboard | Cypress | `modelsAsAService` specs | Dashboard CI | Dashboard team |
-| Performance / scale | — (PSAP CPT pipeline) | — | external | No | see [Performance testing](performance-testing.md) |
+| Suite | Repo | Language | Blocks merge | Owner |
+|-------|------|----------|--------------|-------|
+| `maas-api` unit | models-as-a-service | Go | Yes (GH Actions) | MaaS |
+| `maas-controller` unit | models-as-a-service | Go | Yes (GH Actions) | MaaS |
+| `maas-discovery` unit | models-as-a-service | Go | Yes (GH Actions) | MaaS |
+| PostgreSQL integration | models-as-a-service | Go (build tag) | No | MaaS |
+| MaaS E2E (pytest) | models-as-a-service | Python | Yes (Konflux group-test) | MaaS |
+| Operator chaos | models-as-a-service | GH Action | Yes (path-filtered) | MaaS |
+| AIGC unit + envtest | ai-gateway-controller | Go | Yes | AIGC |
+| AIGC kind ExtProc E2E | ai-gateway-controller | Bash + kind | Not yet ([RHOAIENG-97471](https://issues.redhat.com/browse/RHOAIENG-97471)) | AIGC |
+| AIGC Praxis E2E (runtime checkout of MaaS E2E) | ai-gateway-controller | Python (fetched) | Yes | AIGC + MaaS |
+| AIGPP unit | ai-gateway-payload-processing | Go | Yes | Praxis |
+| AIGPP kind E2E | ai-gateway-payload-processing | Go (ginkgo) | Yes | Praxis |
+| AIGO unit + envtest | ai-gateway-operator | Go | Yes | AIGO |
+| AIGO E2E | ai-gateway-operator | Go | Manual / cluster | AIGO |
+| MaaS nightlies | opendatahub-tests | Python | No (nightly signal) | MaaS + QE |
+| ATRIS / Shepard | atris pipelines | Python (reuses midstream `test/e2e`) | No | ATRIS org |
+| Dashboard UI E2E | odh-dashboard | Cypress | Dashboard CI | Dashboard team |
+| Performance / scale | — (PSAP CPT pipeline) | — | No | see [Performance testing](performance-testing.md) |
 
-Counts are a snapshot taken when this page was written; treat them as orders of
-magnitude, not contract. The authoritative number is whatever `go test ./...` and
-`pytest --collect-only` report today.
+Suite sizes live in the [test inventory](test-inventory.md) with their as-of dates; treat
+them as orders of magnitude, not contract. The authoritative number is whatever
+`go test ./...` and `pytest --collect-only` report today.
 
 ## Keeping this current
 

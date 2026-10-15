@@ -228,11 +228,9 @@ Markers: `smoke`, `tier1`, `tier2`, `tier3`, `sanity`, `component_health`,
 
 ## Ownership
 
-| Repo | Approvers (OWNERS) |
-|------|--------------------|
-| models-as-a-service | chaitanya1731, jland-redhat, dmytro-zaharnytskyi, SB159, ishitasequeira, yu-teo, somya-bhatnagar, liangwen12year, ryancham715, jrhyness, EgorLu, ahadas, mariusdanciu, pierDipi, bartoszmajsak, israel-hdez |
-| ai-gateway-controller | nerdalert, jland-redhat, ishitasequeira, chaitanya1731, ryancham715, shaneutt, aslakknutsen, pierDipi, bartoszmajsak |
-| ai-gateway-payload-processing | nirrozenbaum, nerdalert, jland-redhat, noyitz, yossiovadia, szedan-rh, chaitanya1731 |
-| ai-gateway-operator | chaitanya1731, jland-redhat, ishitasequeira, jrhyness, somya-bhatnagar, pierDipi, bartoszmajsak, llm-d-team |
+Each repo's OWNERS file is the source of truth for approvers:
 
-OWNERS files are the source of truth; the table above is a convenience snapshot.
+- [models-as-a-service/OWNERS](https://github.com/opendatahub-io/models-as-a-service/blob/main/OWNERS)
+- [ai-gateway-controller/OWNERS](https://github.com/opendatahub-io/ai-gateway-controller/blob/main/OWNERS)
+- [ai-gateway-payload-processing/OWNERS](https://github.com/opendatahub-io/ai-gateway-payload-processing/blob/main/OWNERS)
+- [ai-gateway-operator/OWNERS](https://github.com/opendatahub-io/ai-gateway-operator/blob/main/OWNERS)
