@@ -61,6 +61,11 @@ something a PR gate should have caught, move the test up, don't copy it.
    - `serial` — destructive (restarts a controller, deletes a CRD). Runs in the second pass.
    - Tenant groups — anything that creates or mutates AITenants.
 
+   Separately from groups, mark slow or env-heavy tests `@pytest.mark.nightly` —
+   they are excluded from PR /group-test runs and only execute in the third pass
+   when `MAAS_PYTEST_INCLUDE_NIGHTLY=true` (nightly job). `test_external_oidc.py`
+   is the current example.
+
 3. Reuse fixtures from `conftest.py` and helpers from `test_helper.py` /
    `multitenancy_helpers.py`. Do not hand-roll a new auth flow.
 4. Assert on the **response body**, not just the status code. `assert_inference_response()`

@@ -11,32 +11,35 @@ Repo: [opendatahub-io/models-as-a-service](https://github.com/opendatahub-io/mod
 
 ### 1.1 Go unit tests
 
+Counts as of 2026-10-15 (upstream main `0af16844`). Treat as orders of magnitude.
+
 | Package | Tests | What it covers |
 |---------|-------|----------------|
-| `maas-api/internal/api_keys` | 98 | Key minting, hashing, show-once, expiration, revocation, storage |
-| `maas-api/internal/subscription` | 41 | Subscription selection, matching, tier resolution |
-| `maas-api/internal/tlsprofile` | 31 | TLS profile parsing and cipher selection |
+| `maas-api/internal/api_keys` | 100 | Key minting, hashing, show-once, expiration, revocation, storage |
+| `maas-api/internal/subscription` | 64 | Subscription selection, matching, tier resolution |
+| `maas-api/internal/tlsprofile` | 33 | TLS profile parsing and cipher selection |
 | `maas-api/internal/metrics` | 29 | Prometheus metric registration and cardinality |
-| `maas-api/internal/auth` | 22 | Token validation, group extraction, identity sources |
-| `maas-api/cmd` | 20 | Server wiring, CORS, flag parsing |
+| `maas-api/internal/auth` | 24 | Token validation, group extraction, identity sources |
+| `maas-api/cmd` | 25 | Server wiring, CORS, flag parsing |
 | `maas-api/internal/logger` | 17 | Structured logging, redaction |
+| `maas-api/internal/token` | 15 | Token minting / JWT shape |
 | `maas-api/internal/tenant` | 15 | Tenant resolution and scoping |
 | `maas-api/internal/middleware` | 13 | Request middleware chain |
 | `maas-api/internal/handlers` | 12 | HTTP handler contracts |
-| `maas-api/internal/token` | 10 | Token minting / JWT shape |
-| `maas-api/internal/config`, `models`, `authpolicy`, `tracing` | 21 | Config load, model refs, AuthPolicy build, OTel |
-| **maas-api total** | **329** | |
-| `maas-controller/pkg/controller/maas` | 415 | Reconcilers for every MaaS CRD |
-| `maas-controller/pkg/platform/tenantreconcile` | 100 | AITenant platform reconcile pipeline |
-| `maas-controller/cmd/manager` | 27 | Manager setup, flags, RBAC wiring |
-| `maas-controller/pkg/webhook` | 17 | Validating/defaulting webhooks |
+| `maas-api/internal/config`, `models`, `authpolicy`, `tracing` | 22 | Config load, model refs, AuthPolicy build, OTel |
+| **maas-api total** | **369** | |
+| `maas-controller/pkg/controller/maas` | 452 | Reconcilers for every MaaS CRD |
+| `maas-controller/pkg/platform/tenantreconcile` | 117 | AITenant platform reconcile pipeline |
+| `maas-controller/cmd/manager` | 31 | Manager setup, flags, RBAC wiring |
+| `maas-controller/pkg/webhook` | 18 | Validating/defaulting webhooks |
 | `maas-controller/pkg/reconciler/externalmodel` | 15 | ExternalModel / ExternalProvider reconcile |
-| `maas-controller/pkg/oteljson`, `modelnaming`, `docsamples`, `api/...` | 18 | Telemetry JSON, naming, doc samples, CRD types |
-| **maas-controller total** | **592** | |
+| `maas-controller/pkg/oteljson`, `modelnaming`, `docsamples`, `api/...` | 23 | Telemetry JSON, naming, doc samples, CRD types |
+| **maas-controller total** | **658** | |
 | `maas-discovery/internal/tlsprofile` | 31 | TLS profile (shared logic) |
-| `maas-discovery/internal/cache`, `gateway` | 28 | Discovery cache, gateway lookup |
-| `maas-discovery/internal/handler`, `middleware`, `cert`, `types` | 24 | Discovery HTTP surface |
-| **maas-discovery total** | **83** | |
+| `maas-discovery/internal/cache` | 24 | Discovery cache, gateway lookup |
+| `maas-discovery/internal/gateway` | 21 | Gateway lookup/routing |
+| `maas-discovery/internal/handler`, `middleware`, `auth`, `cert`, `types` | 30 | Discovery HTTP surface |
+| **maas-discovery total** | **106** | |
 
 Run: `make -C maas-api test`, `make -C maas-controller test`, `make -C maas-discovery test`.
 Each produces `coverage.html` in its component directory.
@@ -49,11 +52,15 @@ not `testing.Short()`, and `TEST_DATABASE_URL` set.
 
 ### 1.3 E2E (pytest) — the shared suite
 
-`test/e2e/tests/` — 36 modules, ~297 test functions. This is the suite
-`ai-gateway-controller` checks out at runtime, so changes here ripple into another repo's
-merge gate.
+`test/e2e/tests/` — 35 modules, ~309 test functions. This is the suite
+`ai-gateway-controller` checks out at runtime (pinned in `test/maas-e2e.lock`), so
+changes here ripple into another repo's merge gate.
 
-Modules are assigned to **xdist groups**; each group gets a dedicated worker.
+Modules are assigned to **xdist groups**; each group gets a dedicated worker. Since
+[#1638](https://github.com/opendatahub-io/models-as-a-service/pull/1638)
+([RHOAIENG-82335](https://issues.redhat.com/browse/RHOAIENG-82335)) there is also a
+`nightly` marker tier: nightly-marked tests are **excluded from PR /group-test runs**
+and run in an extra pass only when `MAAS_PYTEST_INCLUDE_NIGHTLY=true`.
 
 | Group | Module | Tests | Covers |
 |-------|--------|-------|--------|
@@ -63,6 +70,7 @@ Modules are assigned to **xdist groups**; each group gets a dedicated worker.
 | `readonly` | `test_tenant_discovery.py` | 5 | `/v1/tenants` shape |
 | `readonly` | `test_networkpolicy.py` | 11 | NetworkPolicy + connectivity |
 | `readonly` | `test_gateway_filter_chain.py` | 3 | Envoy filter chain ordering |
+| `readonly` | `test_gateway_filter_chain_praxis.py` | 2 | Filter chain ordering under Praxis dataplane |
 | `readonly` | `test_authpolicy_generation_stability.py` | 2 | AuthPolicy output stable over time |
 | `api_keys` | `test_subscription.py` | 47 | Subscription enforcement, rate limits, auth flows |
 | `api_keys` | `test_api_keys.py` | 40 | Key CRUD, admin authz, validation |
@@ -75,7 +83,7 @@ Modules are assigned to **xdist groups**; each group gets a dedicated worker.
 | `models` | `test_model_identity_conflict.py` | 1 | MaaSModelRef identity collision |
 | `security` | `test_negative_security.py` | 13 | Header spoofing, expired keys, cross-model access |
 | `security` | `test_namespace_scoping.py` | 6 | Namespace isolation |
-| `mt_lifecycle` | `test_tenant_namespace_discovery.py` | 11 | Namespace-label discovery, webhook validation |
+| `mt_lifecycle` | `test_tenant_namespace_discovery.py` | 11 | Namespace-label discovery, webhook validation (partly nightly) |
 | `mt_lifecycle` | `test_aitenant_lifecycle.py` | 6 | AITenant create / migrate / delete |
 | `mt_lifecycle` | `test_multi_tenant_maas_api.py` | 5 | Per-tenant Deployment, Service, HTTPRoute |
 | `mt_lifecycle` | `test_crd_watch_resilience.py` | 3 | Dynamic CRD watch (destructive: restarts controller) |
@@ -84,9 +92,10 @@ Modules are assigned to **xdist groups**; each group gets a dedicated worker.
 | `tenant_isolation` | `test_tenant_rate_limit_isolation.py` | 2 | Per-tenant rate limit independence |
 | `tenant_isolation` | `test_tenant_subscription_isolation.py` | 2 | Per-tenant subscription scoping |
 | `tenant_ipp` | `test_per_tenant_ipp_isolation.py` | 10 | Per-tenant IPP stacks, routing isolation |
-| `tenant_inference` | `test_tenant_model_inference.py` | 5 | Cross-gateway inference isolation |
+| `tenant_ipp` | `test_per_tenant_praxis_isolation.py` | 9 | Per-tenant Praxis dataplane isolation (new, #1636/#1656 era) |
+| `tenant_inference` | `test_tenant_model_inference.py` | 6 | Cross-gateway inference isolation |
 | `tenant_auto_resolve` | `test_tenant_auto_resolve.py` | 3 | MaaSModelRef auto-resolve of `tenantRef` |
-| `external` | `test_external_oidc.py` | 28 | External OIDC flows (skipped unless `EXTERNAL_OIDC=true`) |
+| `external` | `test_external_oidc.py` | 28 | External OIDC flows (**nightly**, skipped in PR runs) |
 | `external` | `test_external_models.py` | 9 | ExternalModel / ExternalProvider, egress, body routing |
 | *(ungrouped)* | `test_trlp_rate_grouping.py` | 8 | TokenRateLimitPolicy rate-group behaviour |
 
@@ -110,9 +119,10 @@ Repo: [opendatahub-io/ai-gateway-controller](https://github.com/opendatahub-io/a
 | kind ExtProc E2E | `test/kind-env/e2e.sh`, `e2e-extproc.sh` | Full ExtProc dataplane on kind, no OpenShift needed |
 | External model static | `test/external-model/test-static.sh` | Static provider routing with templated manifests |
 | Manifest helper tests | `hack/scripts/test-get-manifests.sh`, `test/e2e/scripts/test-deploy-ai-gateway-controller.sh` | Deploy tooling correctness |
-| **Praxis E2E (vendored MaaS suite)** | `test/e2e/scripts/run_e2e_tests.sh` + `fetch-maas-e2e.sh` | **Today this is the primary automated Praxis gate** |
+| **Praxis E2E (runtime checkout of MaaS suite)** | `test/e2e/scripts/run_e2e_tests.sh` + `fetch-maas-e2e.sh` | **Today this is the primary automated Praxis gate** |
 
-The vendored suite pins a MaaS commit in `test/maas-e2e.lock`. An allowlist in
+The suite is fetched into the gitignored `test/maas-e2e/` at the commit pinned in
+`test/maas-e2e.lock`. An allowlist in
 `run_e2e_tests.sh` decides which MaaS modules run. Excluded modules and their re-entry
 criteria are documented in
 [`test/e2e/TODO.md`](https://github.com/opendatahub-io/ai-gateway-controller/blob/main/test/e2e/TODO.md):

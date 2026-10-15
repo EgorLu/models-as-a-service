@@ -58,15 +58,15 @@ flowchart LR
 
 | Suite | Repo | Language | Count | Blocks merge | Owner |
 |-------|------|----------|-------|--------------|-------|
-| `maas-api` unit | models-as-a-service | Go | 329 funcs | Yes (GH Actions) | MaaS |
-| `maas-controller` unit | models-as-a-service | Go | 592 funcs | Yes (GH Actions) | MaaS |
-| `maas-discovery` unit | models-as-a-service | Go | 83 funcs | Yes (GH Actions) | MaaS |
+| `maas-api` unit | models-as-a-service | Go | 369 funcs | Yes (GH Actions) | MaaS |
+| `maas-controller` unit | models-as-a-service | Go | 658 funcs | Yes (GH Actions) | MaaS |
+| `maas-discovery` unit | models-as-a-service | Go | 106 funcs | Yes (GH Actions) | MaaS |
 | PostgreSQL integration | models-as-a-service | Go (build tag) | opt-in | No | MaaS |
-| MaaS E2E (pytest) | models-as-a-service | Python | 36 modules / 297 tests | Yes (Konflux group-test) | MaaS |
+| MaaS E2E (pytest) | models-as-a-service | Python | 35 modules / ~309 tests | Yes (Konflux group-test) | MaaS |
 | Operator chaos | models-as-a-service | GH Action | 1 workflow | Yes (path-filtered) | MaaS |
 | AIGC controller unit | ai-gateway-controller | Go | 20 files | Yes | AIGC |
 | AIGC kind ExtProc E2E | ai-gateway-controller | Bash + kind | 2 scripts | Not yet ([RHOAIENG-97471](https://issues.redhat.com/browse/RHOAIENG-97471)) | AIGC |
-| AIGC Praxis E2E (consumes MaaS E2E) | ai-gateway-controller | Python (vendored) | allowlist subset | Yes | AIGC + MaaS |
+| AIGC Praxis E2E (runtime checkout of MaaS E2E) | ai-gateway-controller | Python (fetched) | allowlist subset | Yes | AIGC + MaaS |
 | AIGPP unit | ai-gateway-payload-processing | Go | 37 files | Yes | Praxis |
 | AIGPP kind E2E | ai-gateway-payload-processing | Go (ginkgo) | 1 suite | Yes | Praxis |
 | AIGO unit + envtest | ai-gateway-operator | Go | 13 files | Yes | AIGO |
@@ -74,7 +74,7 @@ flowchart LR
 | MaaS nightlies | opendatahub-tests | Python | ~150 tests / 9 areas | No (nightly signal) | MaaS + QE |
 | ATRIS / Shepard | atris pipelines | Python (reuses midstream `test/e2e`) | varies | No | ATRIS org |
 | Dashboard UI E2E | odh-dashboard | Cypress | `modelsAsAService` specs | Dashboard CI | Dashboard team |
-| Performance / scale | — | — | **none automated** | No | see [Performance testing](performance-testing.md) |
+| Performance / scale | — (PSAP CPT pipeline) | — | external | No | see [Performance testing](performance-testing.md) |
 
 Counts are a snapshot taken when this page was written; treat them as orders of
 magnitude, not contract. The authoritative number is whatever `go test ./...` and

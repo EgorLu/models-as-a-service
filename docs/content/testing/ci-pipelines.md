@@ -10,16 +10,18 @@ Where each suite actually runs, what triggers it, and which ones can block a mer
 | `maas-controller-ci.yml` | GitHub Actions | PR touching `maas-controller/**` and embedded manifests | maas-controller unit + lint | Yes |
 | `build-test.yml` | GitHub Actions | PR touching controller api/cmd/pkg/Makefile/manifests | Build + manifest render | Yes |
 | `e2e-collect.yml` | GitHub Actions | PR touching `test/e2e/**`, push to main | `pytest --collect-only` on Python 3.11 | Yes |
-| `operator-chaos.yml` | GitHub Actions | PR touching controller api/controller/reconciler + deployment base | Operator chaos | Yes |
+| `operator-chaos.yml` | GitHub Actions | PR touching controller api/controller/reconciler + deployment base | Operator chaos | Yes (path-filtered) |
 | `openapi-validation.yml` | GitHub Actions | PR touching `maas-api/openapi3.yaml` | Spectral lint | Yes |
 | `semgrep-tls.yml`, `tls-lint.yml`, `actionlint.yml`, `pr-title-validation.yml`, `disconnected-readiness.yml` | GitHub Actions | PR | Static checks | Yes |
+| `approval-policy.yml` | GitHub Actions | PR + reviews | Advisory 1-vs-2 approval count by changed paths | Advisory (not yet a required check) |
+| `update-payload-processing.yml` | GitHub Actions | Manual | Opens PR bumping the pinned aigpp commit + image | No (utility) |
 | `scorecard.yml` | GitHub Actions | push main + weekly Mon 03:30 UTC | OpenSSF scorecard | No |
 | `docs.yml`, `update-docs-latest.yml` | GitHub Actions | docs paths / manual | mkdocs build + publish | Docs only |
-| `promote-main-to-stable.yml` | GitHub Actions | Sunday 00:00 UTC + manual | Branch promotion | No |
+| `promote-main-to-stable.yml`, `promote-stable-to-rhoai.yml`, `create-release.yml` | GitHub Actions | Sunday 00:00 UTC + manual | Branch promotion, releases | No |
 | **`maas-group-test`** | **Konflux (Tekton PAC)** | `pull_request` on main, `/group-test` comment, `group-test` event | **Full MaaS E2E on ephemeral Hypershift** | **Yes** |
 | `early-gate-ci-build` / `early-gate-ci-test` | Konflux | `issue_comment` | Early-gate build + test | On demand |
 | `odh-maas-{api,controller,discovery}-{pull-request,push,push-stable}` | Konflux | PR / push / push to stable | Image builds | Yes (build) |
-| `ai-gateway-controller-group-test` | Konflux | PR on main, `/group-test` | AIGC + vendored MaaS E2E (Praxis gate) | Yes |
+| `ai-gateway-controller-group-test` | Konflux | PR on main, `/group-test` | AIGC + runtime-checkout MaaS E2E (Praxis gate) | Yes |
 | `ai-gateway-payload-processing-e2e-ci-*` | Konflux | PR / push | AIGPP kind E2E | Yes |
 | MaaS nightlies | Jenkins / ODH nightly | nightly | `opendatahub-tests` MaaS suite | No |
 | ATRIS / Shepard | Jenkins (ATRIS org) | pipeline schedule | midstream `test/e2e` | No |
@@ -69,8 +71,10 @@ through the group pipeline on the `group-testing` / `maas-group` component.
 Entrypoint: `test/e2e/scripts/prow_run_smoke_test.sh` — a thin orchestrator that sequences
 `deploy-platform.sh` → `deploy-models.sh` → `setup-test-tokens.sh` → `run_e2e_tests.sh`.
 
-Two-pass execution: a parallel pass across xdist groups (`E2E_PARALLEL_WORKERS`, default 7),
-then a serial pass for destructive modules.
+Three-pass execution: a parallel pass across xdist groups (`E2E_PARALLEL_WORKERS`,
+default 7), then a serial pass for destructive modules, then an optional nightly pass
+(`-m nightly`, only when `MAAS_PYTEST_INCLUDE_NIGHTLY=true`). Passes 1-2 always
+exclude nightly-marked tests.
 
 Key environment variables:
 
@@ -82,9 +86,10 @@ Key environment variables:
 | `AI_GATEWAY_OPERATOR_IMAGE` | — | Requires `DEPLOY_MODE=operator` |
 | `DEPLOY_MODE` | `kustomize` | `kustomize` or `operator` |
 | `POLICY_ENGINE` | `rhcl` | Rate-limiting engine |
-| `EXTERNAL_OIDC` | `false` | Enables `test_external_oidc.py` |
+| `EXTERNAL_OIDC` | `false` | Enables external-OIDC tests (now largely superseded by the `nightly` marker tier) |
 | `INSECURE_HTTP` | `false` | Deploy without TLS |
 | `E2E_PARALLEL_WORKERS` | `7` | xdist workers |
+| `MAAS_PYTEST_INCLUDE_NIGHTLY` | `false` | Run the extra nightly-marker pass (pass 3) |
 | `DEPLOYMENT_NAMESPACE` | `opendatahub` | maas-controller namespace |
 | `MAAS_SUBSCRIPTION_NAMESPACE` | `models-as-a-service` | MaaS CR namespace |
 | `AITENANT_NAMESPACE` | `ai-tenants` | AITenant CRs |
